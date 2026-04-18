@@ -1,6 +1,6 @@
 # K2 Wind Farm Energy Output Prediction
 
-A production-grade ML pipeline that predicts hourly energy output (MWh) for wind farms in Ontario, starting with K2 Wind Farm in Goderich, Ontario. Designed to scale to multiple sites across Canada.
+A production-grade ML pipeline that predicts hourly energy output (MWh) for wind farms in Ontario. Project starting with K2 Wind Farm in Ashfield-Colborne-Wawanosh, Ontario. Designed to scale to multiple sites across Canada.
 
 ---
 
@@ -14,61 +14,55 @@ A production-grade ML pipeline that predicts hourly energy output (MWh) for wind
 
 ## Target Site: K2 Wind Farm
 
-- **Location:** Goderich, Ontario (43.74°N, 81.71°W)
+- **Location:** Ashfield-Colborne-Wawanosh, Huron County, Ontario (43.89, -81.62)
+- **Commissioned:** 2015
 - **Capacity:** 270 MW
-- **Turbines:** 140 × Siemens SWT-2.3-101
-- **Hub height:** ~80m
-- **Notable:** ~10km from eastern shore of Lake Huron, which creates local microclimate effects
+- **Turbines:** 140 × Siemens SWT-2.3-101 (1824-2300 kW rated capacity), 101 m rotor diameter
+- **Hub height:** 99.5 m 
+- **Notable:** situated 2 - 12km from eastern shore of Lake Huron which creates local microclimate effects (mainly lake-land breeze circulation)
 
 ---
 
 ## Data Sources
 
-### IESO Generator Output and Capability Report
-- **URL:** https://www.ieso.ca/power-data
-- **Frequency:** Daily XML, ~1-day lag
-- **Parsed with:** `xml.etree.ElementTree` with explicit namespace `http://www.ieso.ca/schema`
-- **Note:** `pd.read_xml()` fails to capture nested context; manual three-loop parsing required
+### IESO (Independent Electricity System Operator) Generator Output and Capability Report
+- **URL:** https://reports-public.ieso.ca/public/GenOutputCapabilityMonth/
+- **Update Frequency:** Daily CSV with 1-day lag 
 
 ### Open-Meteo Historical Forecast API
 - **URL:** https://historical-forecast-api.open-meteo.com
-- **Frequency:** Hourly
-- **Note:** Returns what the forecast model *would have predicted*, not perfect hindsight actuals. This is intentional — training data should mirror production conditions where only forecasts are available.
+- **Note:** The forecast model uses predictions from the day before and not the actual condition on the day itself. This is intentional as the training data should mirror production conditions where only forecasts are available.
 
 ---
 
 ## Prediction Setup
 
-- **Prediction frequency:** Once daily, late at night (~11pm)
+- **Prediction frequency:** Once daily late at night (11.15 pm)
 - **Horizon:** Next 24 hours (hourly resolution)
-- **Rationale for late-night polling:** Minimizes the gap between forecast issue time and actual output, improving forecast accuracy while still predicting a full day ahead
+- **Reason for late-night polling:** Minimizes the gap between forecast issue time and actual output to improve forecast accuracy while still predicting a full day ahead
 
 ---
 
 ## Target Variable
 
-**Output (MWh)** — actual metered production as reported by IESO.
-
-### Why Output and not Available Capacity or Forecast
+**Output (MWh):** actual metered production as reported by IESO. The hourly output is the facility’s five-minute outputs averaged over an hour.
 
 The IESO report provides three measurements for wind generators:
 
 | Measurement | Definition |
 |---|---|
-| Output | Actual metered production. Includes all real-world effects: low wind, curtailment, outages. ±10 MW metering variance. |
-| Available Capacity | Maximum potential output minus turbine derates and outages. Does **not** account for wind availability. Reflects turbine health only. |
-| Forecast | IESO's own wind-aware prediction. Accounts for Available Capacity plus forecasted wind availability. |
+| Output | Actual metered production including all real-world effects: low wind, curtailment, telemetry problems, etc. Variance of ±10 MW. |
+| Available Capacity | Maximum potential output minus turbine derates and outages. Reflects turbine health and availability. |
+| Forecast | IESO's own output prediction accounting for forecasted wind/solar availability. |
 
-**Output** is chosen as the target because:
+Output is chosen as the target because:
 - It is the ground truth of what actually hits the grid
-- Available Capacity has no wind signal — a gap between Available Capacity and Output is primarily explained by wind conditions, not curtailment
-- Using Forecast as a target would mean predicting IESO's own prediction, which conflates this model's independent value with theirs
+- Available Capacity is not useful as a target because it is potential and not actual output.
+- Forecast is not used as a target but will be used for accuracy comparison purposes for the produced model.
 
-### Noise and irreducible error floor
+### Curtailment
 
-Output includes curtailment — when IESO dispatches K2 down due to grid surplus or transmission constraints. Curtailment is indistinguishable from low wind in the Output values alone. This creates an irreducible error floor that the model cannot predict around, since curtailment decisions depend on real-time grid conditions not available as forecast inputs.
-
-The gap between Output and Forecast (IESO's prediction) is bidirectional — Output can exceed Forecast under optimal wind conditions — confirming this is forecast error rather than a clean curtailment signal.
+The output value includes curtailment. This is when IESO reduces energy intake from generators due to grid surplus, transmission constraints, or grid stability. This also creates an error floor that the model cannot predict since curtailment happens depending on unpredictable, real-time grid conditions. Low Output values due to curtailment is indistinguishable low wind conditions. 
 
 ---
 
@@ -104,7 +98,7 @@ The gap between Output and Forecast (IESO's prediction) is bidirectional — Out
 | Feature | Rationale |
 |---|---|
 | Elevation (m) | Captures terrain effects on local wind patterns |
-| Distance to nearest large water body (km) | Captures microclimate effects. For K2, proximity to Lake Huron (~10km) creates lake-effect wind patterns |
+| Distance to nearest large water body (km) | Captures microclimate effects. For K2, proximity to Lake Huron creates lake-effect wind patterns |
 | Prevailing wind direction (°) | Site-specific historical prevailing direction, used to compute wind direction deviation feature |
 | Capacity (MW) | Sets the scale of expected output |
 | Hub height (m) | Determines the relevant wind speed measurement height |
@@ -117,7 +111,7 @@ The gap between Output and Forecast (IESO's prediction) is bidirectional — Out
 - Replaced by elevation and distance to water, which carry actual physical signal about terrain and microclimate
 
 **Raw wind direction**
-- Wind direction is physically meaningful but its *effect* on output is site-specific — it depends on turbine orientation and layout, which is not publicly available and cannot be generalized across sites
+- Wind direction is physically meaningful but the effect on output is site-specific. It depends on turbine orientation and layout which is not publicly available and cannot be generalized across sites.
 - Replaced by wind direction deviation from prevailing (see below)
 
 **Time features (hour of day, day of year)**
