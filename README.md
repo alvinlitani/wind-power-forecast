@@ -33,6 +33,10 @@ A production-grade ML pipeline that predicts hourly energy output (MWh) for wind
 - **URL:** https://historical-forecast-api.open-meteo.com
 - **Note:** The forecast model uses predictions from the day before and not the actual condition on the day itself. This is intentional as the training data should mirror production conditions where only forecasts are available.
 
+### Canadian Wind Turbine Database
+- **URL:** https://open.canada.ca/data/en/dataset/79fdad93-9025-49ad-ba16-c26d718cc070
+- **Update Frequency:** No set frequency
+
 ---
 
 ## Prediction Setup
@@ -56,68 +60,99 @@ The IESO report provides three measurements for wind generators:
 | Forecast | IESO's own output prediction accounting for forecasted wind/solar availability. |
 
 Output is chosen as the target because:
-- It is the ground truth of what actually hits the grid
+- Measurement of how much energy actually enters the grid
 - Available Capacity is not useful as a target because it is potential and not actual output.
 - Forecast is not used as a target but will be used for accuracy comparison purposes for the produced model.
 
 ### Curtailment
 
-The output value includes curtailment. This is when IESO reduces energy intake from generators due to grid surplus, transmission constraints, or grid stability. This also creates an error floor that the model cannot predict since curtailment happens depending on unpredictable, real-time grid conditions. Low Output values due to curtailment is indistinguishable low wind conditions. 
+The output value includes curtailment. This is when IESO reduces energy intake from generators due to grid surplus, transmission constraints, or grid stability. This also creates an error floor that the model cannot predict since curtailment happens depending on unpredictable, real-time grid conditions. Low Output values due to curtailment is indistinguishable from low wind conditions. 
 
 ---
 
 ## Feature Selection
 
+Wind power is given by following equation: P = 0.5 × Cp × ρ × A × v³
+
+**ρ (air density, kg/m³):** — denser air contains more mass per unit volume, so more kinetic energy passes through the rotor at the same wind speed. This is why turbines produce more power on cold days than hot days at identical wind speeds.
+
+**A (rotor swept area, m²)** — the circular area swept by the blades, calculated as π × (rotor_diameter / 2)². Larger rotors intercept more air mass per second. This is why modern turbines have increasingly large rotors — a 10% increase in rotor diameter gives a 21% increase in swept area (area scales with diameter squared).
+
+**v³ (wind speed cubed, m/s)** — this is the dominant term and the most important to internalize. It has two contributions:
+- Kinetic energy per unit mass is proportional to v² (from KE = 0.5mv²)
+- Mass flow rate through the rotor per second is proportional to v (more air passes through per second at higher wind speed)
+- Combined: energy per second (power) scales as v² × v = v³
+
+The cubic relationship is why wind speed is so disproportionately important — going from 8 m/s to 10 m/s wind speed (25% increase) produces nearly double the power (25³ ÷ 8³ ≈ 1.95x). It also explains why small wind speed forecast errors cause large output prediction errors, and why your model's worst predictions will cluster around the steep part of the power curve.
+
+**Cp (power coefficient)** — efficiency of the turbine at converting available wind power to electrical output. Varies with wind speed and turbine design, typically 0.35–0.45 for modern turbines at optimal wind speeds. Drops sharply outside the turbine's optimal operating range.
+
+Features will be selected according to the compenents of the wind power equation.
+
 ### Time-Varying Encoder Features (past observations fed to encoder)
 
-| Feature | Source | Rationale |
+| Feature | Source | Reason |
 |---|---|---|
-| Output (MWh) | IESO | Historical actual production as temporal context for the encoder |
-| Available Capacity (MW) | IESO | Turbine health indicator. Low Available Capacity signals derates or outages independent of wind conditions |
-| Wind speed at 80m (m/s) | Open-Meteo | Primary driver of wind power output. 80m matches K2 hub height |
-| Temperature (°C) | Open-Meteo | Affects air density and turbine performance |
-| Surface pressure (hPa) | Open-Meteo | Affects air density |
-| Air density (kg/m³) | Derived | Computed from temperature and pressure: ρ = P / (R × T), where R = 287.05 J/(kg·K). Directly affects power output and avoids making the model discover this relationship implicitly |
-| Wind direction deviation (°) | Derived | See wind direction section below |
+| Output (MWh) | IESO | Historical actual metered production as prediction target |
+| Available Capacity (MW) | IESO | Maximum output and turbine health indicator. Low Available Capacity indicates turbine derates or outages. |
+| `wind_speed_hub` (m/s) | Derived | Wind speed at hub height interpolated or snapped from Open-Meteo levels. See hub height wind speed section. |
+| `wind_direction_hub` (°) | Derived | Wind direction at hub height interpolated. See hub height wind speed section. |
+| Surface temperature (°C) | Open-Meteo | Used for air density calculation. Interpolation to hub height unnecessary. See temperature and pressure section. |
+| Surface pressure (hPa) | Open-Meteo | Used for air density calculation. Interpolation to hub height unnecessary. See temperature and pressure section. |
+| Air density (kg/m³) | Derived | Computed from surface temperature and pressure: ρ = P / (R × T), where R = 287.05 J/(kg·K). Directly affects power output. |
 
 ### Time-Varying Decoder Features (future forecasts fed to decoder)
 
-| Feature | Source | Rationale |
+| Feature | Source | Reason |
 |---|---|---|
-| Wind speed at 80m (m/s) | Open-Meteo forecast | Primary weather driver, available as forecast |
-| Temperature (°C) | Open-Meteo forecast | Available as forecast |
-| Surface pressure (hPa) | Open-Meteo forecast | Available as forecast |
-| Air density (kg/m³) | Derived | Computed from forecast temperature and pressure |
-| Wind direction deviation (°) | Derived | Computed from forecast wind direction and site prevailing direction |
-| Available Capacity (MW) | IESO | Planned outages and derates are known ahead of time |
+| `wind_speed_hub` (m/s) | Derived | Forecast wind speed at hub height. |
+| `wind_direction_hub` (°) | Derived | Forecast wind direction at hub height. |
+| Surface temperature (°C) | Open-Meteo forecast | Used for air density calculation. |
+| Surface pressure (hPa) | Open-Meteo forecast | Used for air density calculation. |
+| Air density (kg/m³) | Derived | Computed from forecast surface temperature and pressure. |
+| Available Capacity (MW) | IESO | Planned outages and derates are known ahead of time. |
 
-**Note:** Historical Output is not available as a decoder feature — it is the prediction target.
+**Note:** Output is not available as a decoder feature as it is the prediction target.
 
 ### Static Site Features (fed once as site context)
 
-| Feature | Rationale |
+| Feature | Reason |
 |---|---|
-| Elevation (m) | Captures terrain effects on local wind patterns |
-| Distance to nearest large water body (km) | Captures microclimate effects. For K2, proximity to Lake Huron creates lake-effect wind patterns |
-| Prevailing wind direction (°) | Site-specific historical prevailing direction, used to compute wind direction deviation feature |
-| Capacity (MW) | Sets the scale of expected output |
-| Hub height (m) | Determines the relevant wind speed measurement height |
-| site_id | One-hot encoded site identifier. Captures residual site-specific quirks not explained by other static features. Only meaningful for known sites — new sites rely on physical features until fine-tuned |
+| Elevation (m) | Captures terrain effects on local wind patterns. |
+| Distance to nearest large water body (km) | Captures microclimate effects. For K2, proximity to Lake Huron creates lake-effect wind patterns. |
+| Capacity (MW) | Name plate installed capacity of the farm. Distinct from Available Capacity which varies hour by hour based on outages and derates. |
+| Hub height (m) | Reference height for turbine specifications. |
+| site_id | One-hot encoded site identifier. Captures other site-specific quirks not explained by other static features. Only meaningful for previously learned sites with new sites relying on physical features until fine-tuned. |
 
 ### Features Considered and Rejected
 
 **Raw latitude and longitude**
-- Raw coordinates are arbitrary numbers with no physical meaning to the model
-- Replaced by elevation and distance to water, which carry actual physical signal about terrain and microclimate
+- Raw coordinates are arbitrary numbers with no physical meaning to the model.
+- Replaced by elevation and distance to water that carry actual physical signal about terrain and microclimate.
 
-**Raw wind direction**
-- Wind direction is physically meaningful but the effect on output is site-specific. It depends on turbine orientation and layout which is not publicly available and cannot be generalized across sites.
-- Replaced by wind direction deviation from prevailing (see below)
+**Wind direction deviation from prevailing**
+- Initially considered as a site-agnostic encoding of wind direction
+- Rejected for two reasons: (1) circular variance analysis of 2025 K2 data showed a value of 0.798 (close to 1 = random), meaning no single dominant prevailing direction exists across seasons — the prevailing direction is a statistical artifact, not a physically meaningful reference point; (2) 3% of hours showed physically implausible veering of >90° between 80m and 120m, making a single interpolated direction unreliable
+- Replaced by `wind_direction_hub` derived consistently per site
+
+**Dual wind speed/direction at 80m and 120m directly**
+- Initially considered because K2's rotor (101m diameter, 99.5m hub) sweeps from ~49m to ~150m, encompassing both Open-Meteo measurement heights
+- Rejected in favour of a consistent `wind_speed_hub` and `wind_direction_hub` feature across all sites — the dual-height approach is K2-specific and does not generalize to sites that snap to a single level
+
+**Wind shear exponent α**
+- Initially considered as an atmospheric stability signal derived from 80m and 120m wind speeds
+- Rejected because it is only computable for sites where two bracketing Open-Meteo levels are available — sites that snap to a single level cannot produce α, making it inconsistent across the multi-site fleet
+- Atmospheric stability dropped entirely rather than replaced with a weaker proxy
+
+**Atmospheric stability proxies (boundary layer height, wind gusts at 10m)**
+- Boundary layer height: direct NWP stability indicator but uncertain relevance to hub-height power output
+- Wind gusts at 10m: captures surface turbulence but is a weak proxy for conditions at hub height
+- Both dropped in favour of a lean feature set with direct physical justification
 
 **Time features (hour of day, day of year)**
-- Season is already captured by temperature and pressure — adding month/day of year would be redundant
-- Time features would bias the model against freak weather events: if an unusual wind condition occurs in July that normally only happens in January, weather features correctly represent it while time features would push predictions toward July-typical output
-- Dropped in favor of features with direct physical causality
+- Season is already captured by temperature and pressure so adding month/day of year would be redundant.
+- Time features would bias the model against freak weather events. If an unusual wind condition occurs in July that normally only happens in January, weather features correctly represent it while time features would push predictions toward July-typical output.
+- Dropped in favor of features with direct physical causality.
 
 **IESO Forecast measurement**
 - Using IESO's own forecast as a feature conflates this model's predictions with theirs
@@ -125,28 +160,56 @@ The output value includes curtailment. This is when IESO reduces energy intake f
 
 ---
 
-## Wind Direction Handling
+## Hub Height Wind Speed and Direction
 
-### The Problem
-Wind direction is one of the most important drivers of wind farm output. However, the effect of any given wind direction depends on turbine orientation and layout, which varies per site and is not publicly available. A westerly wind at K2 may be highly productive while the same direction is suboptimal at a site with different turbine layout.
+Open-Meteo provides wind speed and direction at fixed heights: 80m, 120m, and 180m. Wind farm hub heights vary across Ontario's turbines from ~80m on older projects to 132m on the tallest. A consistent `wind_speed_hub` and `wind_direction_hub` feature is needed that works correctly for any site.
 
-Including raw wind direction would allow the model to learn site-specific directional response for known sites, but would not generalize to unseen sites.
-
-### Solution: Deviation from Prevailing Direction
-Wind direction is encoded as the angular deviation from the site's historical prevailing wind direction:
-
+**Within 10m of an available level, snap to that level. More than 10m from the nearest level, interpolate between the two bracketing levels using the log wind profile:**
 ```python
-deviation = (wind_direction - prevailing_direction + 180) % 360 - 180
+def get_wind_speed_hub(hub_height, wind_speed_80m, wind_speed_120m, wind_speed_180m):
+    levels = {80: wind_speed_80m, 120: wind_speed_120m, 180: wind_speed_180m}
+    nearest = min(levels, key=lambda h: abs(h - hub_height))
+
+    if abs(nearest - hub_height) <= 10:
+        return levels[nearest]  # snap
+
+    # Find bracketing levels
+    lower = max(h for h in levels if h <= hub_height)
+    upper = min(h for h in levels if h >= hub_height)
+    return interpolate_wind_speed(levels[lower], levels[upper], lower, upper, hub_height)
+
+def interpolate_wind_speed(v_low, v_high, h_low, h_high, h_target, z0=0.03):
+    log_low = np.log(h_low / z0)
+    log_high = np.log(h_high / z0)
+    log_target = np.log(h_target / z0)
+    weight = (log_target - log_low) / (log_high - log_low)
+    return v_low + weight * (v_high - v_low)
 ```
 
-This normalizes wind direction to a site-agnostic scale:
-- `0°` = wind is coming from the most historically productive direction
-- Large deviation = wind is coming from an atypical direction
+Wind direction will snap to nearest level since there is no standard interpolation formula equivalent to the wind speed formula. 
 
-Prevailing direction is a static site feature computed from historical data and stored per site.
+### Ontario Fleet Hub Height Distribution
+Some of the turbines listed in the Canadian Wind Turbine Database (FGP) does not have its output recorded in the IESO report. For this analysis, only generators listed in both shall be taken into account:
 
-### Why This Generalizes
-A new site can compute its own prevailing direction from historical Open-Meteo data before any fine-tuning. The model then sees deviation from prevailing as a consistent signal across all sites regardless of turbine orientation.
+| Open-Meteo level | Hub height range | Projects |
+|---|---|---|
+| Snap to 80m | ≤90m | ~61 projects |
+| Interpolate 80m–120m | 90–110m | ~33 projects |
+| Snap to 120m or interpolate 120m–180m | >110m | ~6 projects |
+
+---
+
+## Temperature and Pressure
+
+Open-Meteo provides pressure at surface level and temperatures at 80m and 120m. Correcting these to hub height was considered but rejected:
+
+**Temperature:**
+Temperature changes with height at the standard lapse rate of ~6.5°C per 1000m. For the different heights of the , this is approximately 0.65°C — negligible for air density calculations.
+
+**Pressure:**
+Using the barometric formula, the pressure difference between surface and 100m is ~1.2 hPa, representing less than 0.12% change in air density. This is well within the ±10 MW metering variance of IESO Output values.
+
+**Conclusion:** Surface temperature and surface pressure are used directly for air density computation. The corrections are smaller than the measurement noise floor and add complexity without meaningful accuracy gain.
 
 ---
 
@@ -241,12 +304,3 @@ This is the key advantage of replacing raw lat/lon with physically meaningful fe
 | Prefect worker | Oracle Cloud ARM VM | Always-free, avoids GCP Cloud Run Jobs complexity |
 
 **Note:** Prefect handles scheduled daily execution independently of GitHub Actions. GitHub Actions handles CI/CD triggered by code changes. These are complementary, not redundant.
-
----
-
-## Domain Notes for Interviews
-
-- **IESO curtailment:** IESO can dispatch wind farms down during grid surplus or transmission congestion. Curtailment is indistinguishable from low wind in Output values — both appear as lower-than-expected output given wind conditions. This creates an irreducible model error floor.
-- **Metering variance:** IESO Output values have ±10 MW operational metering variance. Small gaps between Output and Forecast are within this noise range.
-- **Available Capacity vs wind availability:** Available Capacity reflects turbine health only — it does not drop when wind is low. A large gap between Available Capacity and Output is primarily explained by wind conditions, not curtailment.
-- **Historical Forecast API:** Training uses the Historical Forecast API (not the Archive API) to match production conditions — the model will always run on forecasts, never on perfect hindsight actuals.
