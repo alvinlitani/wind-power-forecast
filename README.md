@@ -1,4 +1,4 @@
-# K2 Wind Farm Energy Output Prediction
+# Ontario Wind Farm Energy Output Prediction
 
 A production-grade ML pipeline that predicts hourly energy output (MWh) for wind farms in Ontario. Project starting with K2 Wind Farm in Ashfield-Colborne-Wawanosh, Ontario. Designed to scale to multiple sites across Canada.
 
@@ -12,28 +12,11 @@ A production-grade ML pipeline that predicts hourly energy output (MWh) for wind
 
 ---
 
-## Target Site: Ontario wind farms
-
-- **Location:** Ashfield-Colborne-Wawanosh, Huron County, Ontario (43.89, -81.62)
-- **Commissioned:** 2015
-- **Capacity:** 270 MW
-- **Turbines:** 140 × Siemens SWT-2.3-101 (1824-2300 kW rated capacity), 101 m rotor diameter
-- **Hub height:** 99.5 m 
-- **Notable:** situated 2 - 12km from eastern shore of Lake Huron which creates local microclimate effects (mainly lake-land breeze circulation)
-
-### Ontario Fleet Hub Height Distribution
-Some of the turbines listed in the Canadian Wind Turbine Database (FGP) does not have its output recorded in the IESO report. For this analysis, only generators listed in both shall be taken into account:
-
-| Open-Meteo level | Hub height range | Projects |
-|---|---|---|
-| Snap to 80m | ≤90m | ~61 projects |
-| Interpolate 80m–120m | 90–110m | ~33 projects |
-| Snap to 120m or interpolate 120m–180m | >110m | ~6 projects |
-
-
----
-
 ## Data Sources
+
+### Canadian Wind Turbine Database
+- **URL:** https://open.canada.ca/data/en/dataset/79fdad93-9025-49ad-ba16-c26d718cc070
+- **Update Frequency:** Irregular with last update 2025-09-16
 
 ### IESO (Independent Electricity System Operator) Generator Output and Capability Report
 - **URL:** https://reports-public.ieso.ca/public/GenOutputCapabilityMonth/
@@ -43,9 +26,27 @@ Some of the turbines listed in the Canadian Wind Turbine Database (FGP) does not
 - **URL:** https://historical-forecast-api.open-meteo.com
 - **Note:** The forecast model uses predictions from the day before and not the actual condition on the day itself. This is intentional as the training data should mirror production conditions where only forecasts are available.
 
-### Canadian Wind Turbine Database
-- **URL:** https://open.canada.ca/data/en/dataset/79fdad93-9025-49ad-ba16-c26d718cc070
-- **Update Frequency:** No set frequency
+---
+
+## Target Sites: Ontario wind farms
+
+For this ML pipeline, data about the hub height and rotor diameter is important for building a model that can predict specific sites. The reason is that Ontario wind farms have varying hub heights and rotor diameters and this greatly affects output generation. Unfortunately, the Canadian Wind Turbine Dataset containing that information has not been updated regularly and the names used in both reports can be different. 
+
+The IESO generator output report listed 45 unique locations while the Canadian Wind Turbine Database listed 100 unique locations in Ontario. I tried my best to reconcile the discrepancies using other means such as Ontario Renewable Energy Approval (REA) applications and online global energy databases. Only those locations that I am confident in will be included. 
+
+- **Locations:** 45 recorded locations
+- **Commission Years:** 2015
+- **Years used for training data:** 2023-2025
+- **Capacity:** 270 MW
+- **Turbines:** 140 × Siemens SWT-2.3-101 (1824-2300 kW rated capacity), 101 m rotor diameter
+- **Hub height:** 99.5 m 
+- **Notable:** Some sites are situated near geographic sites that can create local microclimate effects on wind such as lakes or mountains. An example is the K2 wind farm turbines situated 2 - 12km from eastern shore of Lake Huron.
+
+| Open-Meteo level | Hub height range | Projects |
+|---|---|---|
+| Snap to 80m | ≤90m | ~61 projects |
+| Interpolate 80m–120m | 90–110m | ~33 projects |
+| Snap to 120m or interpolate 120m–180m | >110m | ~6 projects |
 
 ---
 
