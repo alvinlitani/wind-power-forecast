@@ -55,9 +55,8 @@ def download_month(yyyymm: str, output_dir: Path) -> bool:
     filename = FILENAME_TEMPLATE.format(yyyymm=yyyymm)
     url = f"{BASE_URL}/{filename}"
     year = yyyymm[:4]
-    year_dir = output_dir / year
-    year_dir.mkdir(parents=True, exist_ok=True)
-    dest = year_dir / filename
+    output_dir.mkdir(parents=True, exist_ok=True)
+    dest = output_dir / filename
 
     if dest.exists():
         print(f"  SKIP {filename} (already exists)")
@@ -91,7 +90,7 @@ def main():
     )
     parser.add_argument(
         "--output",
-        default="data/raw/ieso",
+        default="../../data/raw/ieso",
         help="Base output directory (default: data/raw/ieso)",
     )
     args = parser.parse_args()

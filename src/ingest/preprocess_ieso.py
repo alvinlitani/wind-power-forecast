@@ -79,12 +79,12 @@ def main():
     )
     parser.add_argument(
         "--input",
-        default="data/raw/ieso",
+        default="../../data/raw/ieso",
         help="Raw data directory (default: data/raw/ieso)",
     )
     parser.add_argument(
         "--output",
-        default="data/processed/ieso",
+        default="../../data/processed/ieso",
         help="Processed output directory (default: data/processed/ieso)",
     )
     args = parser.parse_args()
