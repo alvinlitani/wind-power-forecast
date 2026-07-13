@@ -1,8 +1,8 @@
 """
 Preprocess raw IESO Generator Output and Capability CSVs.
 
-Reads from data/raw/ieso/{year}/, writes cleaned files to
-data/processed/ieso/{year}/. Preserves the same directory structure.
+Reads from <DATA_ROOT>/raw/ieso/, writes cleaned files to
+<DATA_ROOT>/processed/ieso/ with the same filenames.
 
 Preprocessing steps:
 1. Strip leading comment lines (lines starting with '\\')
@@ -10,13 +10,16 @@ Preprocessing steps:
 3. Handle trailing commas (None-keyed fields from DictReader)
 
 Usage:
-    python preprocess_ieso.py --input data/raw/ieso --output data/processed/ieso
+    python -m wind_forecast.ingest.preprocess_ieso
+    python -m wind_forecast.ingest.preprocess_ieso --input gs://bucket/raw/ieso --output gs://bucket/processed/ieso
 """
 
 import argparse
 import csv
+import io
 import sys
-from pathlib import Path
+
+from wind_forecast import storage
 
 
 def strip_leading_comments(lines: list[str]) -> list[str]:
@@ -37,8 +40,6 @@ def filter_wind_rows(lines: list[str]) -> tuple[list[str], list[dict]]:
 
     Returns (fieldnames, rows) where rows are dicts with None keys removed.
     """
-    import io
-
     reader = csv.DictReader(io.StringIO("".join(lines)))
     fieldnames = reader.fieldnames
 
@@ -50,13 +51,14 @@ def filter_wind_rows(lines: list[str]) -> tuple[list[str], list[dict]]:
     return fieldnames, rows
 
 
-def preprocess_file(src: Path, dest: Path) -> int:
+def preprocess_file(src: str, dest: str) -> int:
     """Preprocess a single IESO CSV file.
+
+    src and dest may be local paths or gs:// URIs.
 
     Returns the number of WIND rows written.
     """
-    with open(src, "r", encoding="utf-8") as f:
-        lines = f.readlines()
+    lines = storage.read_text(src).splitlines(keepends=True)
 
     lines = strip_leading_comments(lines)
     fieldnames, rows = filter_wind_rows(lines)
@@ -64,11 +66,16 @@ def preprocess_file(src: Path, dest: Path) -> int:
     if not rows:
         return 0
 
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    with open(dest, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(rows)
+    # Build the CSV in memory, then write through the storage helper so the
+    # same code path works for local disk and GCS.
+    buf = io.StringIO()
+    writer = csv.DictWriter(
+        buf, fieldnames=fieldnames, extrasaction="ignore", lineterminator="\n"
+    )
+    writer.writeheader()
+    writer.writerows(rows)
+
+    storage.write_bytes(buf.getvalue().encode("utf-8"), dest)
 
     return len(rows)
 
@@ -79,20 +86,20 @@ def main():
     )
     parser.add_argument(
         "--input",
-        default="../../data/raw/ieso",
-        help="Raw data directory (default: data/raw/ieso)",
+        default=storage.data_path("raw", "ieso"),
+        help="Raw data directory (local or gs://). Defaults to <DATA_ROOT>/raw/ieso",
     )
     parser.add_argument(
         "--output",
-        default="../../data/processed/ieso",
-        help="Processed output directory (default: data/processed/ieso)",
+        default=storage.data_path("processed", "ieso"),
+        help="Processed output directory (local or gs://). Defaults to <DATA_ROOT>/processed/ieso",
     )
     args = parser.parse_args()
 
-    input_dir = Path(args.input)
-    output_dir = Path(args.output)
+    input_dir = args.input.rstrip("/")
+    output_dir = args.output.rstrip("/")
 
-    csv_files = sorted(input_dir.rglob("*.csv"))
+    csv_files = sorted(storage.glob(f"{input_dir}/*.csv"))
     if not csv_files:
         print(f"No CSV files found in {input_dir}")
         sys.exit(1)
@@ -101,13 +108,12 @@ def main():
 
     total_rows = 0
     for src in csv_files:
-        # Preserve year subdirectory structure
-        rel = src.relative_to(input_dir)
-        dest = output_dir / rel
+        filename = src.rstrip("/").split("/")[-1]
+        dest = f"{output_dir}/{filename}"
 
         n_rows = preprocess_file(src, dest)
         total_rows += n_rows
-        print(f"  {rel}: {n_rows} WIND rows")
+        print(f"  {filename}: {n_rows} WIND rows")
 
     print(f"\nDone: {total_rows} total WIND rows across {len(csv_files)} files")
 

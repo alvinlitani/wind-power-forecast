@@ -1,1 +1,7 @@
 data/
+src/train/__pycache__/
+src/models/
+src/models_cf/
+models/
+models_cf/
+wf-job-invoker-key.json

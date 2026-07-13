@@ -1,216 +1,206 @@
-# Ontario Wind Farm Energy Output Prediction
+# Wind Power Forecasting
 
-A production-grade ML pipeline that predicts hourly energy output (MWh) for wind farms in Ontario. Project starting with K2 Wind Farm in Ashfield-Colborne-Wawanosh, Ontario. Designed to scale to multiple sites across Canada.
+End-to-end ML pipeline forecasting hourly wind power output for 45 IESO-regulated Ontario wind sites. Two production models (LSTM and per-site XGBoost) serve predictions via a daily flow that ingests weather forecasts, runs inference, and evaluates against IESO actuals.
 
----
-
-## Project Goals
-
-- Predict the next 24 hours of hourly energy output for a wind farm, once daily
-- Demonstrate a production-grade ML pipeline with daily data ingestion, experiment tracking, and monitoring
-- Build a generalizable multi-site model architecture that transfers knowledge across wind farms
+The pipeline is built for production discipline: cloud-native storage abstraction, scheduled orchestration, infrastructure as code, and reproducible local development. It is deliberately *not* a notebook-only project — the goal is to demonstrate what shipping ML to a renewable-energy operator actually requires.
 
 ---
 
-## Data Sources
+## At a glance
 
-### Canadian Wind Turbine Database
-- **URL:** https://open.canada.ca/data/en/dataset/79fdad93-9025-49ad-ba16-c26d718cc070
-- **Update Frequency:** Irregular with last update 2025-09-16
-
-### IESO (Independent Electricity System Operator) Generator Output and Capability Report
-- **URL:** https://reports-public.ieso.ca/public/GenOutputCapabilityMonth/
-- **Update Frequency:** Daily CSV with 1-day lag 
-
-### Open-Meteo Historical Forecast API
-- **URL:** https://historical-forecast-api.open-meteo.com
-- **Note:** The forecast model uses predictions from the day before and not the actual condition on the day itself. This is intentional as the training data should mirror production conditions where only forecasts are available.
-
----
-
-## Target Sites: Ontario wind farms
-
-For this ML pipeline, data about the hub height and rotor diameter is important for building a model that can predict specific sites. The reason is that Ontario wind farms have varying hub heights and rotor diameters and this greatly affects output generation. Unfortunately, the Canadian Wind Turbine Dataset containing that information has not been updated regularly and the names used in both reports can be different. 
-
-The IESO generator output report listed 45 unique locations while the Canadian Wind Turbine Database listed 100 unique locations in Ontario. I tried my best to reconcile the discrepancies using other means such as Ontario Renewable Energy Approval (REA) applications and online global energy databases. Only those locations that I am confident in will be included. 
-
-- **Locations:** 45 recorded locations
-- **Commission Years:** 2015
-- **Years used for training data:** 2023-2025
-- **Capacity:** 270 MW
-- **Turbines:** 140 × Siemens SWT-2.3-101 (1824-2300 kW rated capacity), 101 m rotor diameter
-- **Hub height:** 99.5 m 
-- **Notable:** Some sites are situated near geographic sites that can create local microclimate effects on wind such as lakes or mountains. An example is the K2 wind farm turbines situated 2 - 12km from eastern shore of Lake Huron.
-
-| Open-Meteo level | Hub height range | Projects |
-|---|---|---|
-| Snap to 80m | ≤90m | ~61 projects |
-| Interpolate 80m–120m | 90–110m | ~33 projects |
-| Snap to 120m or interpolate 120m–180m | >110m | ~6 projects |
-
----
-
-## Prediction Setup
-
-- **Prediction frequency:** Once daily late at night (11.15 pm)
-- **Horizon:** Next 24 hours (hourly resolution)
-- **Reason for late-night polling:** Minimizes the gap between forecast issue time and actual output to improve forecast accuracy while still predicting a full day ahead
-
----
-
-## Target Variable
-
-**Output (MWh):** actual metered production as reported by IESO. The hourly output is the facility’s five-minute outputs averaged over an hour.
-
-The IESO report provides three measurements for wind generators:
-
-| Measurement | Definition |
+|  |  |
 |---|---|
-| Output | Actual metered production including all real-world effects: low wind, curtailment, telemetry problems, etc. Variance of ±10 MW. |
-| Available Capacity | Maximum potential output minus turbine derates and outages. Reflects turbine health and availability. |
-| Forecast | IESO's own output prediction accounting for forecasted wind/solar availability. |
-
-Output is chosen as the target because:
-- Measurement of how much energy actually enters the grid
-- Available Capacity is not useful as a target because it is potential and not actual output.
-- Forecast is not used as a target but will be used for accuracy comparison purposes for the produced model.
-
-The output value includes curtailment. This is when IESO reduces energy intake from generators due to grid surplus, transmission constraints, or grid stability. This also creates an error floor that the model cannot predict since curtailment happens depending on unpredictable, real-time grid conditions. Low Output values due to curtailment is indistinguishable from low wind conditions. 
-
----
-
-## Feature Selection
-
-Wind power is given by following equation: P = 0.5 × Cp × ρ × A × v³
-Features will be selected according to the compenents of the wind power equation.
-
-Wind direction will also be used since it matters a lot for power generation and Ontario turbines have different directions.
-
-### Time-Varying Encoder Features (past observations fed to encoder)
-
-| Feature | Source | Reason |
-|---|---|---|
-| Output (MWh) | IESO | Historical actual metered production as prediction target |
-| Available Capacity (MW) | IESO | Maximum output and turbine health indicator. Low Available Capacity indicates turbine derates or outages. |
-| `wind_speed_hub` (m/s) | Derived | Wind speed at hub height interpolated or snapped from Open-Meteo levels. See hub height wind speed section. |
-| `wind_direction_hub` (°) | Derived | Wind direction at hub height interpolated. See hub height wind speed section. |
-| Surface temperature (°C) | Open-Meteo | Used for air density calculation. Interpolation to hub height unnecessary. See temperature and pressure section. |
-| Surface pressure (hPa) | Open-Meteo | Used for air density calculation. Interpolation to hub height unnecessary. See temperature and pressure section. |
-| Air density (kg/m³) | Derived | Computed from surface temperature and pressure: ρ = P / (R × T), where R = 287.05 J/(kg·K). Directly affects power output. |
-
-### Time-Varying Decoder Features (future forecasts fed to decoder)
-
-| Feature | Source | Reason |
-|---|---|---|
-| `wind_speed_hub` (m/s) | Derived | Forecast wind speed at hub height. |
-| `wind_direction_hub` (°) | Derived | Forecast wind direction at hub height. |
-| Surface temperature (°C) | Open-Meteo forecast | Used for air density calculation. |
-| Surface pressure (hPa) | Open-Meteo forecast | Used for air density calculation. |
-| Air density (kg/m³) | Derived | Computed from forecast surface temperature and pressure. |
-| Available Capacity (MW) | IESO | Planned outages and derates are known ahead of time. |
-
-**Note:** Output is not available as a decoder feature as it is the prediction target.
-
-### Static Site Features (fed once as site context)
-
-| Feature | Reason |
-|---|---|
-| Elevation (m) | Captures terrain effects on local wind patterns. |
-| Distance to nearest large water body (km) | Captures microclimate effects. For K2, proximity to Lake Huron creates lake-effect wind patterns. |
-| Capacity (MW) | Name plate installed capacity of the farm. Distinct from Available Capacity which varies hour by hour based on outages and derates. |
-| Hub height (m) | Reference height for turbine specifications. |
-| site_id | One-hot encoded site identifier. Captures other site-specific quirks not explained by other static features. Only meaningful for previously learned sites with new sites relying on physical features until fine-tuned. |
-
-### Features Considered and Rejected
-
-**Raw latitude and longitude**
-
-
-**Wind direction deviation from prevailing**
-
-
-**Dual wind speed/direction at 80m and 120m directly**
-
-
-**Wind shear exponent α**
-
-
-**Atmospheric stability proxies (boundary layer height, wind gusts at 10m)**
-
-
-**Time features (hour of day, day of year)**
-
-
-**IESO Forecast measurement**
-
+| **Domain** | Wind power generation forecasting for grid operations (Ontario, Canada) |
+| **Sites covered** | 45 IESO-regulated wind farms, ~3.5 GW combined nameplate capacity |
+| **Forecast horizon** | 24 hours, hourly resolution |
+| **Models** | Seq2seq LSTM (multi-site); per-site XGBoost power curve |
+| **Refresh** | LSTM 1×/day; XGBoost 4×/day on NWP cadence |
+| **Training data** | 2023–2024 (~17,500 hours per site) |
+| **Test set** | Jan–Apr 2026 |
+| **LSTM test MAE** | ~11.66 MWh aggregate |
+| **XGBoost test MAE** | ~11.84% (capacity factor) |
+| **Stack** | PyTorch · XGBoost · pandas · Prefect · FastAPI · GCS · Terraform · GitHub Actions · W&B · Grafana |
 
 ---
 
-## Hub Height Wind Speed and Direction
+## Why this problem
 
-Open-Meteo provides wind speed and direction at fixed heights: 80m, 120m, and 180m. Wind farm hub heights vary across Ontario's turbines from ~80m on older projects to 132m on the tallest. A consistent `wind_speed_hub` and `wind_direction_hub` feature is needed that works correctly for any site.
+Ontario operates a competitive wholesale electricity market with a day-ahead bidding window closing around 10:00 ET. Wind generators that can produce accurate next-day forecasts earn better revenue and reduce balancing costs for the grid operator. Forecast errors of 1% across the 3.5 GW Ontario wind fleet translate to roughly 35 MW of unexpected generation per hour — material at grid scale.
 
-Wind direction will snap to nearest level since there is no standard interpolation formula equivalent to the wind speed formula. 
-
-
----
-
-## Temperature and Pressure
-
-Open-Meteo provides pressure at surface level and temperatures at 80m and 120m. Correcting these to hub height was considered but rejected:
-
-**Temperature:**
-Temperature changes with height at the standard lapse rate of ~6.5°C per 1000m. For the different heights of the , this is approximately 0.65°C — negligible for air density calculations.
-
-**Pressure:**
-Using the barometric formula, the pressure difference between surface and 100m is ~1.2 hPa, representing less than 0.12% change in air density. This is well within the ±10 MW metering variance of IESO Output values.
-
-**Conclusion:** Surface temperature and surface pressure are used directly for air density computation. The corrections are smaller than the measurement noise floor and add complexity without meaningful accuracy gain.
+Public forecasts exist (IESO publishes its own) but improvement against the IESO baseline is the natural benchmark for any new model. This project's models are evaluated against that baseline daily.
 
 ---
 
-## Model Architecture
+## Architecture
 
-### Overview
-Sequence-to-sequence (seq2seq) LSTM with transfer learning and per-site fine-tuning.
+The production pipeline runs on GCP free-tier services with an Oracle Cloud ARM VM as the Prefect worker. Storage is split into two buckets (data and models) for independent lifecycle/IAM. The serving layer is decoupled from the prediction pipeline — predictions are pre-computed on a schedule, the API just reads CSVs from GCS.
 
-### Why Seq2Seq
+```
+                  ┌──────────────────────┐
+                  │   Prefect Cloud      │  Schedules + UI
+                  │   (control plane)    │
+                  └──────────┬───────────┘
+                             │ "run now"
+                             ▼
+                  ┌──────────────────────┐
+                  │   Oracle ARM VM      │  Prefect worker
+                  │   (compute plane)    │  Executes flows
+                  └──────────┬───────────┘
+                             │
+                             ▼
+       ┌──────────────────────────────────────────┐
+       │              GCS (storage)               │
+       │  ─────────────────────────────────────   │
+       │  wind-power-forecast-data/               │
+       │    raw/ieso/, processed/ieso/,           │
+       │    predictions/{lstm,pc,weather}/,       │
+       │    evaluations/{lstm,pc,baseline}/       │
+       │                                          │
+       │  wind-power-forecast-models/             │
+       │    cf/ (LSTM), pc/ (XGBoost)             │
+       └──────────────────────────────────────────┘
+                             ▲
+                             │ reads
+                  ┌──────────┴───────────┐
+                  │   Cloud Run          │  FastAPI service
+                  │   (serving)          │  /predict, /history
+                  └──────────────────────┘
+```
 
+### Daily schedule (Eastern Time)
 
-### Architecture Details
+| Time  | Flow(s) | Purpose |
+|-------|---------|---------|
+| 02:15 | predict (XGBoost only) | Uses 00 UTC NWP run |
+| 08:15 | ingest ∥ predict (both models) ∥ evaluate | LSTM here because IESO actuals just published. Predictions ready ~08:35 ET, ahead of 10:00 ET DAM bid deadline. |
+| 14:15 | predict (XGBoost only) | Uses 12 UTC NWP run |
+| 20:15 | predict (XGBoost only) | Uses 18 UTC NWP run |
 
-
-### Why LSTM over XGBoost
-
-
-### Why LSTM before TFT (Temporal Fusion Transformer)
-
+The three 08:15 flows fire in parallel — `evaluate_flow` polls for `ingest_flow`'s output rather than waiting on a flow-to-flow dependency, so a delayed IESO publish doesn't block today's predictions.
 
 ---
 
-## Multi-Site Strategy
+## Modeling choices
 
-### Pretraining (general model)
+### Why two models in production
 
+The LSTM and XGBoost serve different purposes. The LSTM uses 48 hours of past site output (from IESO actuals) as encoder context, which makes it capable of learning site-specific dynamics — but it can only run once a day, after IESO publishes. The XGBoost is a stateless power curve (weather → output), so it can rerun any time fresh weather lands. Both run every weekday morning; the XGBoost also runs at 02:15, 14:15, and 20:15 for intra-day positioning.
 
-### Fine-tuning (per-site adaptation)
+Building the LSTM *first*, then layering XGBoost, was deliberate — the LSTM exists to validate that the pipeline is model-agnostic and to provide a benchmark before considering more architectures (Temporal Fusion Transformer is the planned next upgrade).
 
+### Feature inclusion discipline
 
-### Generalization to Unseen Sites
+Features were included only if they carry signal not already captured by existing inputs. Several feature candidates were tested and excluded with explicit justification:
+
+- **Wind direction** — yaw-controlled turbines make raw direction irrelevant; any site-specific directional effects can't generalize across the multi-site model and are captured implicitly during fine-tuning.
+- **Site elevation** — effects on output are already captured by NWP wind speed at hub height and by pressure/temperature.
+- **Distance to water** — the mechanism (wind speed enhancement near large water bodies) is already an input to the NWP model.
+- **Air density** — derivable from temperature and pressure, both already present.
+- **Boundary layer height** — variable not available pre-2025 in the Open-Meteo Historical Forecast API.
+
+Final inputs (per site, per hour): `wind_speed_80m`, `wind_speed_120m`, `temperature_2m`, `surface_pressure`, plus static features (capacity, hub height, site embedding) for the LSTM.
+
+### Capacity factor as the target
+
+Both models predict capacity factor (MWh ÷ nameplate capacity) rather than raw MWh. Across 45 sites of vastly different sizes (60 MW to 270 MW) this is essential for the LSTM's multi-site generalization — a single model with a shared output head would otherwise overweight large sites in the loss. Predictions are converted back to MWh at serving time using the per-site nameplate.
+
+### Train on forecast weather, not actuals
+
+Training uses Open-Meteo's Historical Forecast API — i.e., what the forecast *was* for each historical hour — rather than reanalysis (what the weather actually *did*). This matches the conditions the model sees at inference time and avoids the silent domain-shift bug where a model trained on perfect weather catastrophically underperforms when given forecast weather in production.
 
 ---
 
-## MLOps Stack
+## Pipeline structure
 
-| Component | Tool | Rationale |
-|---|---|---|
-| Infrastructure | Terraform | IaC, run locally |
-| CI/CD | GitHub Actions | Triggered by code changes |
-| Orchestration | Prefect Cloud | Daily scheduled pipeline execution |
-| Experiment tracking | Weights & Biases | Model versioning and metric tracking |
-| Monitoring | Grafana Cloud | Production dashboards |
-| Prediction API | FastAPI on GCP Cloud Run | Serves 24-hour predictions |
-| Artifact storage | GCP Cloud Storage | Model artifacts and processed data |
-| Prefect worker | Oracle Cloud ARM VM | Always-free, avoids GCP Cloud Run Jobs complexity |
+```
+wind-power-forecast/
+├── src/wind_forecast/
+│   ├── config.py        # DATA_ROOT / MODELS_ROOT env-var resolution
+│   ├── storage.py       # I/O helper: routes between local disk and gs://
+│   ├── model.py         # LSTM network definition (shared by train + predict)
+│   ├── ingest/          # IESO download + weather fetch
+│   ├── features/        # Feature engineering (training)
+│   ├── predict/         # LSTM + XGBoost inference
+│   ├── evaluate/        # MAE vs IESO actuals, IESO baseline comparison
+│   └── train/           # Training, fine-tuning, hyperparameter tuning
+├── flows/
+│   ├── tasks.py         # Prefect @task wrappers around package functions
+│   ├── ingest_flow.py   # IESO actuals → preprocess
+│   ├── predict_flow.py  # Weather fetch → LSTM and/or XGBoost
+│   └── evaluate_flow.py # Eval yesterday's predictions vs IESO actuals
+├── api/                 # FastAPI service (Cloud Run) — TBD
+├── infra/               # Terraform (GCS, IAM, Cloud Run) — TBD
+└── pyproject.toml       # Package + extras [pipeline], [api], [dev]
+```
 
-**Note:** Prefect handles scheduled daily execution independently of GitHub Actions. GitHub Actions handles CI/CD triggered by code changes. These are complementary, not redundant.
+The storage helper is the load-bearing piece. Every script reads/writes through `wind_forecast.storage`, which routes `data/...` to local disk and `gs://bucket/...` to GCS based on the path prefix. The same code runs unchanged on a laptop (`DATA_ROOT=data`) and inside the Prefect worker (`DATA_ROOT=gs://wind-power-forecast-data`).
+
+---
+
+## Local development
+
+Requirements: Python 3.10+, CPU is fine (training the LSTM on CPU takes a few hours; inference is fast).
+
+```bash
+# Clone and install in editable mode with the pipeline extras
+git clone https://github.com/alvinlitani/wind-power-forecast.git
+cd wind-power-forecast
+pip install -e ".[pipeline]"
+
+# Configure storage roots (defaults point at local ./data and ./models)
+cp .env.example .env
+
+# Run a flow once, locally — Prefect runs in ephemeral mode, no cloud needed
+python -m flows.predict_flow
+python -m flows.ingest_flow
+python -m flows.evaluate_flow
+```
+
+Individual scripts also still run as plain modules:
+
+```bash
+python -m wind_forecast.ingest.fetch_forecast_all
+python -m wind_forecast.predict.predict_pc --run-timestamp 20260528_0815
+python -m wind_forecast.evaluate.evaluate_daily \
+    --prediction data/predictions/lstm/20260528_0815.csv
+```
+
+---
+
+## Data sources
+
+- **IESO Generator Output and Capability Report** — hourly per-generator actuals + IESO's own forecast. CSV, published ~06:00 ET daily for the prior month. Used as ground truth and as the baseline benchmark.
+- **Open-Meteo Historical Forecast API** — past forecast weather used for training. Mirrors production conditions (forecast, not reanalysis) to avoid distribution shift.
+- **Open-Meteo Forecast API** — live forecasts used at inference time. Best-match model selection per coordinate (deterministic — same model used at training and inference for any given site).
+- **Wind Turbine Database FGP** — per-site nameplate, hub height, rotor diameter.
+
+---
+
+## Roadmap
+
+- [x] Local pipeline (ingest, features, train, predict, evaluate) for both models
+- [x] Storage abstraction (local ↔ GCS)
+- [x] Python package + Prefect flows
+- [ ] Terraform: GCS buckets, Artifact Registry, Cloud Run, IAM
+- [ ] Docker image for the Prefect worker
+- [ ] Prefect Cloud + Oracle ARM VM worker
+- [ ] FastAPI on Cloud Run serving both models
+- [ ] GitHub Actions: test + image build + Cloud Run deploy
+- [ ] Grafana dashboard: daily MAE, per-site, LSTM-vs-XGBoost, drift alerts
+- [ ] W&B integration for daily metrics logging
+- [ ] Temporal Fusion Transformer (next model upgrade)
+- [ ] National scope expansion (sites beyond Ontario)
+
+---
+
+## Known limitations
+
+- Training and backfill scripts still use the pre-package import style and local filesystem paths. They run on the development laptop; they will need converting if/when training moves to the cloud.
+- The 02:15 ET XGBoost slot runs against potentially-stale weather data (the 00 UTC NWP run may not be fully ingested by Open-Meteo at that hour). The other three slots are fresh.
+- Anomaly handling is rule-based (e.g., BOW LAKE excluded for months with mean output exactly zero while available capacity is positive). A statistical anomaly detector is out of scope for v1.
+
+---
+
+## License
+
+TBD

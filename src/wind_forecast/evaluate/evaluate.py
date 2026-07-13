@@ -26,7 +26,6 @@ import torch.nn as nn
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "train"))
 from model import WindPowerLSTM
 
-
 def normalize(
     tensor: torch.Tensor, mean: torch.Tensor, std: torch.Tensor
 ) -> torch.Tensor:

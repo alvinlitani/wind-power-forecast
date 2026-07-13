@@ -1,0 +1,20 @@
+Metadata-Version: 2.4
+Name: wind-forecast
+Version: 0.1.0
+Summary: Wind power forecasting pipeline for IESO-regulated Ontario wind sites
+Requires-Python: >=3.10
+Requires-Dist: numpy
+Requires-Dist: pandas
+Requires-Dist: requests
+Requires-Dist: xgboost
+Requires-Dist: torch
+Requires-Dist: gcsfs
+Provides-Extra: pipeline
+Requires-Dist: prefect>=2.0; extra == "pipeline"
+Requires-Dist: wandb; extra == "pipeline"
+Provides-Extra: api
+Requires-Dist: fastapi; extra == "api"
+Requires-Dist: uvicorn[standard]; extra == "api"
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: ruff; extra == "dev"

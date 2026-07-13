@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wind-forecast"
+version = "0.1.0"
+description = "Wind power forecasting pipeline for IESO-regulated Ontario wind sites"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pandas",
+    "requests",
+    "xgboost",
+    "torch",
+    "gcsfs",          # enables gs:// paths for pandas + the storage helper
+]
+
+[project.optional-dependencies]
+# Orchestration + serving + tracking. Kept optional so a minimal install
+# (e.g. for local model work) doesn't drag in the whole cloud stack.
+pipeline = [
+    "prefect>=2.0",
+    "wandb",
+]
+api = [
+    "fastapi",
+    "uvicorn[standard]",
+]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# Console entry points: after `pip install -e .` these become runnable
+# commands, so the daily flow / cron can call `wf-predict-pc` instead of
+# `python -m wind_forecast.predict.predict_pc`. Added incrementally as each
+# script's main() is confirmed package-clean.
+[project.scripts]
+wf-predict-pc = "wind_forecast.predict.predict_pc:main"
+wf-daily = "wind_forecast.pipeline.daily:main"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
