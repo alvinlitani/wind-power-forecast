@@ -28,8 +28,9 @@ SECRET_BLOCK = "wf-job-invoker-key"
 
 
 def _build_client() -> run_v2.JobsClient:
-    key_json = Secret.load(SECRET_BLOCK).get()
-    creds = service_account.Credentials.from_service_account_info(json.loads(key_json))
+    key = Secret.load(SECRET_BLOCK).get()
+    info = key if isinstance(key, dict) else json.loads(key)
+    creds = service_account.Credentials.from_service_account_info(info)
     return run_v2.JobsClient(credentials=creds)
 
 
@@ -41,7 +42,7 @@ def trigger_wind_forecast_job():
     # run.jobs.get -- read the code version the Job is configured to run.
     job = client.get_job(name=JOB_NAME)
     env = {e.name: e.value for c in job.template.template.containers for e in c.env}
-    code_sha = env.get("CODE_SHA", "unknown")
+    code_sha = env.get("CODE_SHA", "local")
 
     # run.jobs.run -- start the execution. Returns an operation immediately;
     # we deliberately do NOT call .result(), so this stays fire-and-forget.
