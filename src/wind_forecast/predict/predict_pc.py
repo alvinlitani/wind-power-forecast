@@ -55,6 +55,12 @@ FORECAST_HOURS_OUTPUT = 24
 # surfaced as a hard error below — not an exclusion.)
 EXPECTED_EXCLUSIONS: set[str] = set()
 
+# Fail-closed data-quality gate. XGBoost imputes NaN natively (routes them
+# down a learned default branch), so a site with null weather still emits
+# plausible-looking numbers and passes a site-count roster check. The roster
+# gate counts sites, not values -- this counts values.
+MAX_NAN_FEATURE_HOURS = 0
+
 
 def load_mapping(mapping_path: str) -> dict[str, dict]:
     """Load generator mapping CSV into a dict keyed by generator_id (no spaces)."""
@@ -216,12 +222,33 @@ def main():
     failed_sites = []
     produced_sites = set()
     not_in_mapping = []
+    degraded_sites: dict[str, int] = {}     # gen_id -> NaN feature-hour count
+    short_sites: dict[str, int] = {}        # gen_id -> hours produced (< expected)
 
     for gen_id in sorted(models.keys()):
         if gen_id not in mapping:
             print(f"  WARNING: {gen_id} in models but not in mapping, skipping.")
             not_in_mapping.append(gen_id)
             continue
+
+        # Data-quality gate: a site whose weather carries NaNs still predicts
+        # (XGBoost imputes silently), so a site-count check alone would pass it
+        # green. Fail closed on values, not just on presence.
+        if degraded_sites:
+            raise RuntimeError(
+                f"Degraded weather in {len(degraded_sites)} site(s) "
+                f"(NaN feature hours): {dict(sorted(degraded_sites.items()))}. "
+                f"Recovery is upstream (re-fetch)."
+            )
+
+        # Coverage gate: filter_to_future_24h takes .head(24), so a snapshot with
+        # fewer future hours yields a short site that would otherwise pass the
+        # site-count check. Partial coverage is a silently-wrong aggregate too.
+        if short_sites:
+            raise RuntimeError(
+                f"Short prediction window in {len(short_sites)} site(s) "
+                f"(< {FORECAST_HOURS_OUTPUT}h): {dict(sorted(short_sites.items()))}."
+            )
 
         site = mapping[gen_id]
         cap = site["nameplate_capacity"]
@@ -237,11 +264,19 @@ def main():
             print(f"  {gen_id}: no future hours in snapshot, skipping")
             failed_sites.append(gen_id)
             continue
+        if len(weather_df) < FORECAST_HOURS_OUTPUT:
+            short_sites[gen_id] = len(weather_df)
 
-        # Check for missing weather data
-        missing = weather_df[FEATURE_COLS].isnull().any(axis=1).sum()
-        if missing > 0:
-            print(f"  {gen_id}: {missing}/{len(weather_df)} hours have missing weather data")
+        # Data-quality check: NaN feature hours are recorded, not tolerated.
+        # Deferred to the gate below so the run reports every bad site at once
+        # rather than dying on the first.
+        nan_hours = int(weather_df[FEATURE_COLS].isnull().any(axis=1).sum())
+        if nan_hours > MAX_NAN_FEATURE_HOURS:
+            print(f"  {gen_id}: {nan_hours}/{len(weather_df)} hours have missing "
+                  f"weather data (exceeds MAX_NAN_FEATURE_HOURS={MAX_NAN_FEATURE_HOURS})")
+            degraded_sites[gen_id] = nan_hours
+        elif nan_hours > 0:
+            print(f"  {gen_id}: {nan_hours} NaN feature hour(s), within tolerance")
 
         # Predict
         X = weather_df[FEATURE_COLS]
