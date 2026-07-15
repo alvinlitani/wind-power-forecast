@@ -118,9 +118,13 @@ def main():
     # --- Roster-completeness gate (fail closed) ---
     # Expected = every site in mapping minus any explicit, named exclusion.
     # If any expected site did not produce a snapshot, the Ontario aggregate
-    # downstream would be silently incomplete, so we raise. Recovery is the
-    # caller's job: the Prefect task carries retries=3, so a transient
-    # Open-Meteo failure re-runs the whole fetch and typically self-heals.
+    # downstream would be silently incomplete, so we raise. Recovery is the 
+    # caller's job: under the fire-and-forget control plane, Prefect triggers 
+    # this Job and returns immediately -- it never observes this failure. 
+    # The actual retry is Cloud Run's own --max-retries on wind-forecast-job, 
+    # which re-runs the entire wf-daily wrapper (fetch + predict), 
+    # not just the fetch. Per-request transient drops are absorbed earlier, 
+    # inside fetch_forecast._SESSION's Retry.
     expected = set(sites) - EXPECTED_EXCLUSIONS
     missing = expected - succeeded_sites
     if missing:

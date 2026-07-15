@@ -68,7 +68,11 @@ HOURLY_VARIABLES = [
     "surface_pressure",
 ]
 
-# Fetch 3 days back + 1 day forward to cover any run time
+# Fetch 3 days back + 1 day forward to cover any run time.
+# PAST_DAYS feeds the encoder window of the sequence models (LSTM today, TFT
+# next); the XGBoost power-curve path is pointwise and discards it in
+# predict_pc.filter_to_future_24h. Retained deliberately -- it rides along in
+# the same single API call, so it costs no extra request.
 PAST_DAYS = 3
 FORWARD_DAYS = 1
 
