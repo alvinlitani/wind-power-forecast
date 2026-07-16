@@ -1,10 +1,9 @@
 data/
-src/train/__pycache__/
 src/models/
 src/models_cf/
 models/
 models_cf/
 wf-job-invoker-key.json
 .vscode/settings.json
-flows/__pycache__/
-src/wind_forecast.egg-info/
+*.egg-info/
+__pycache__/
