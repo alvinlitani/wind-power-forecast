@@ -1,2 +1,0 @@
-[console_scripts]
-wf-predict-pc = wind_forecast.predict.predict_pc:main
