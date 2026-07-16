@@ -29,12 +29,13 @@ import argparse
 import csv
 import os
 import pickle
-import sys
 from datetime import datetime
 
 import pandas as pd
 
 from wind_forecast import storage
+
+from typing import Callable
 
 
 FEATURE_COLS = [
@@ -134,6 +135,119 @@ def filter_to_future_24h(df: pd.DataFrame, now_local: datetime) -> pd.DataFrame:
     current_hour = now_local.replace(minute=0, second=0, microsecond=0)
     return df[df["datetime"] > current_hour].head(FORECAST_HOURS_OUTPUT)
 
+def run_batch(
+    models: dict,
+    mapping: dict,
+    run_timestamp: str,
+    now_local: datetime,
+    code_sha: str,
+    weather_loader: Callable[[str], "pd.DataFrame | None"],
+) -> list[dict]:
+    """Run per-site prediction over the full roster and return output rows.
+
+    Extracted from main() so the gate logic is testable without storage/argparse
+    I/O. `weather_loader(gen_id)` returns that site's full weather snapshot (or
+    None if absent); in production it's a thin closure over load_weather_snapshot,
+    in tests it's an in-memory dict lookup.
+
+    All three fail-closed gates (data-quality NaN, short-window, roster) run
+    AFTER the loop, so every site is examined before any gate fires — no site,
+    including the last one processed, escapes the check, and all bad sites are
+    reported at once. Raises RuntimeError on any gate breach; returns the row
+    list on a clean batch.
+    """
+    all_rows = []
+    failed_sites = []
+    produced_sites = set()
+    not_in_mapping = []
+    degraded_sites: dict[str, int] = {}     # gen_id -> NaN feature-hour count
+    short_sites: dict[str, int] = {}        # gen_id -> hours produced (< expected)
+
+    for gen_id in sorted(models.keys()):
+        if gen_id not in mapping:
+            print(f"  WARNING: {gen_id} in models but not in mapping, skipping.")
+            not_in_mapping.append(gen_id)
+            continue
+
+        site = mapping[gen_id]
+        cap = site["nameplate_capacity"]
+
+        full_weather = weather_loader(gen_id)
+        if full_weather is None:
+            print(f"  {gen_id}: weather snapshot not found, skipping")
+            failed_sites.append(gen_id)
+            continue
+        weather_df = filter_to_future_24h(full_weather, now_local)
+        if len(weather_df) == 0:
+            print(f"  {gen_id}: no future hours in snapshot, skipping")
+            failed_sites.append(gen_id)
+            continue
+        if len(weather_df) < FORECAST_HOURS_OUTPUT:
+            short_sites[gen_id] = len(weather_df)
+
+        # NaN feature hours are recorded, not tolerated. Accumulated here and
+        # raised at the post-loop gate so the run reports every bad site at once.
+        nan_hours = int(weather_df[FEATURE_COLS].isnull().any(axis=1).sum())
+        if nan_hours > MAX_NAN_FEATURE_HOURS:
+            print(f"  {gen_id}: {nan_hours}/{len(weather_df)} hours have missing "
+                  f"weather data (exceeds MAX_NAN_FEATURE_HOURS={MAX_NAN_FEATURE_HOURS})")
+            degraded_sites[gen_id] = nan_hours
+        elif nan_hours > 0:
+            print(f"  {gen_id}: {nan_hours} NaN feature hour(s), within tolerance")
+
+        X = weather_df[FEATURE_COLS]
+        pred_mwh = models[gen_id].predict(X).clip(0, cap)
+        pred_cf = pred_mwh / cap
+
+        for idx, (_, row) in enumerate(weather_df.iterrows()):
+            all_rows.append({
+                "datetime": row["datetime"],
+                "generator_id": site["ieso_name"],
+                "predicted_mwh": round(float(pred_mwh[idx]), 2),
+                "predicted_cf": round(float(pred_cf[idx]), 4),
+                "run_timestamp": run_timestamp,
+                "code_sha": code_sha,
+            })
+
+        print(f"  {gen_id}: {len(weather_df)} hours, "
+              f"avg predicted {pred_mwh.mean():.1f} MWh "
+              f"(CF {pred_cf.mean():.1%})")
+        produced_sites.add(gen_id)
+
+    if not all_rows:
+        raise RuntimeError("No predictions generated.")
+
+    # --- Data-quality gates (fail closed), post-loop so every site is examined ---
+    if degraded_sites:
+        raise RuntimeError(
+            f"Degraded weather in {len(degraded_sites)} site(s) "
+            f"(NaN feature hours): {dict(sorted(degraded_sites.items()))}. "
+            f"Recovery is upstream (re-fetch)."
+        )
+    if short_sites:
+        raise RuntimeError(
+            f"Short prediction window in {len(short_sites)} site(s) "
+            f"(< {FORECAST_HOURS_OUTPUT}h): {dict(sorted(short_sites.items()))}."
+        )
+
+    # --- Roster-completeness gate (fail closed) ---
+    if not_in_mapping:
+        raise RuntimeError(
+            f"Model/mapping drift: {len(not_in_mapping)} site(s) have models "
+            f"but are absent from mapping.csv: {sorted(not_in_mapping)}"
+        )
+
+    expected = (set(models) & set(mapping)) - EXPECTED_EXCLUSIONS
+    missing = expected - produced_sites
+    if missing:
+        raise RuntimeError(
+            f"Incomplete prediction batch: {len(missing)} of {len(expected)} "
+            f"expected sites missing predictions: {sorted(missing)}. "
+            f"(failed_sites={sorted(failed_sites)})"
+        )
+
+    print(f"  Roster complete: {len(produced_sites)}/{len(expected)} expected sites.")
+    return all_rows
 
 def main():
     parser = argparse.ArgumentParser(
@@ -218,136 +332,29 @@ def main():
 
     print(f"\nLoading weather and predicting...\n")
 
-    all_rows = []
-    failed_sites = []
-    produced_sites = set()
-    not_in_mapping = []
-    degraded_sites: dict[str, int] = {}     # gen_id -> NaN feature-hour count
-    short_sites: dict[str, int] = {}        # gen_id -> hours produced (< expected)
+    def weather_loader(gen_id: str):
+        return load_weather_snapshot(weather_dir, gen_id, run_timestamp)
 
-    for gen_id in sorted(models.keys()):
-        if gen_id not in mapping:
-            print(f"  WARNING: {gen_id} in models but not in mapping, skipping.")
-            not_in_mapping.append(gen_id)
-            continue
-
-        # Data-quality gate: a site whose weather carries NaNs still predicts
-        # (XGBoost imputes silently), so a site-count check alone would pass it
-        # green. Fail closed on values, not just on presence.
-        if degraded_sites:
-            raise RuntimeError(
-                f"Degraded weather in {len(degraded_sites)} site(s) "
-                f"(NaN feature hours): {dict(sorted(degraded_sites.items()))}. "
-                f"Recovery is upstream (re-fetch)."
-            )
-
-        # Coverage gate: filter_to_future_24h takes .head(24), so a snapshot with
-        # fewer future hours yields a short site that would otherwise pass the
-        # site-count check. Partial coverage is a silently-wrong aggregate too.
-        if short_sites:
-            raise RuntimeError(
-                f"Short prediction window in {len(short_sites)} site(s) "
-                f"(< {FORECAST_HOURS_OUTPUT}h): {dict(sorted(short_sites.items()))}."
-            )
-
-        site = mapping[gen_id]
-        cap = site["nameplate_capacity"]
-
-        # Read this site's weather snapshot, trim to next 24h
-        full_weather = load_weather_snapshot(weather_dir, gen_id, run_timestamp)
-        if full_weather is None:
-            print(f"  {gen_id}: weather snapshot not found, skipping")
-            failed_sites.append(gen_id)
-            continue
-        weather_df = filter_to_future_24h(full_weather, now_local)
-        if len(weather_df) == 0:
-            print(f"  {gen_id}: no future hours in snapshot, skipping")
-            failed_sites.append(gen_id)
-            continue
-        if len(weather_df) < FORECAST_HOURS_OUTPUT:
-            short_sites[gen_id] = len(weather_df)
-
-        # Data-quality check: NaN feature hours are recorded, not tolerated.
-        # Deferred to the gate below so the run reports every bad site at once
-        # rather than dying on the first.
-        nan_hours = int(weather_df[FEATURE_COLS].isnull().any(axis=1).sum())
-        if nan_hours > MAX_NAN_FEATURE_HOURS:
-            print(f"  {gen_id}: {nan_hours}/{len(weather_df)} hours have missing "
-                  f"weather data (exceeds MAX_NAN_FEATURE_HOURS={MAX_NAN_FEATURE_HOURS})")
-            degraded_sites[gen_id] = nan_hours
-        elif nan_hours > 0:
-            print(f"  {gen_id}: {nan_hours} NaN feature hour(s), within tolerance")
-
-        # Predict
-        X = weather_df[FEATURE_COLS]
-        pred_mwh = models[gen_id].predict(X).clip(0, cap)
-        pred_cf = pred_mwh / cap
-
-        for idx, (_, row) in enumerate(weather_df.iterrows()):
-            all_rows.append({
-                "datetime": row["datetime"],
-                # Written value is the IESO canonical name (spaced, e.g. "PORT BURWELL")
-                # so prediction files match IESO's Generator identifier. Internal keys
-                # (model lookup, weather filenames) remain stripped via gen_id.
-                "generator_id": site["ieso_name"],
-                "predicted_mwh": round(float(pred_mwh[idx]), 2),
-                "predicted_cf": round(float(pred_cf[idx]), 4),
-                "run_timestamp": run_timestamp,
-                "code_sha": code_sha,
-            })
-
-        print(f"  {gen_id}: {len(weather_df)} hours, "
-              f"avg predicted {pred_mwh.mean():.1f} MWh "
-              f"(CF {pred_cf.mean():.1%})")
-        produced_sites.add(gen_id)
-
-    if not all_rows:
-        raise RuntimeError("No predictions generated.")
-
-    # --- Roster-completeness gate (fail closed) ---
-    # This stage validates its own contract independently of the fetch stage:
-    # every site that is in BOTH the model set and mapping (minus explicit
-    # exclusions) must have produced a prediction. A shortfall means the
-    # Ontario aggregate is silently incomplete, so we raise rather than write
-    # a green-but-wrong prediction file.
-    #
-    # Two distinct failure classes, surfaced separately:
-    #   - not_in_mapping: a model exists for a site absent from mapping.csv.
-    #     A structural model/mapping drift -> hard error.
-    #   - missing: an expected site produced no rows (weather snapshot absent
-    #     or no future hours) -> hard error; recovery is upstream (re-fetch).
-    if not_in_mapping:
-        raise RuntimeError(
-            f"Model/mapping drift: {len(not_in_mapping)} site(s) have models "
-            f"but are absent from mapping.csv: {sorted(not_in_mapping)}"
-        )
-
-    expected = (set(models) & set(mapping)) - EXPECTED_EXCLUSIONS
-    missing = expected - produced_sites
-    if missing:
-        raise RuntimeError(
-            f"Incomplete prediction batch: {len(missing)} of {len(expected)} "
-            f"expected sites missing predictions: {sorted(missing)}. "
-            f"(failed_sites={sorted(failed_sites)})"
-        )
+    all_rows = run_batch(
+        models=models,
+        mapping=mapping,
+        run_timestamp=run_timestamp,
+        now_local=now_local,
+        code_sha=code_sha,
+        weather_loader=weather_loader,
+    )
 
     # --- Save output ---
-    # Output filename matches the run_timestamp so the prediction CSV is
-    # paired 1:1 with the weather batch that produced it.
     filename = f"{run_timestamp}.csv"
     output_path = f"{args.output_dir.rstrip('/')}/{filename}"
-
     output_df = pd.DataFrame(all_rows)
     storage.write_csv(output_df, output_path)
 
     pred_start = output_df["datetime"].min()
     pred_end = output_df["datetime"].max()
-
     print(f"\nPredictions saved to {output_path}")
-    print(f"  {len(produced_sites)} sites × ~{FORECAST_HOURS_OUTPUT} hours "
-          f"= {len(all_rows)} rows")
+    print(f"  {len(output_df)} rows")
     print(f"  Prediction window: {pred_start} to {pred_end}")
-    print(f"  Roster complete: {len(produced_sites)}/{len(expected)} expected sites.")
 
 
 if __name__ == "__main__":
