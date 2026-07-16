@@ -1,19 +1,22 @@
 """
 Predict flow: fetch weather snapshot + run requested model(s).
 
-Schedules:
-    - 02:15 ET: predict_flow(lstm=False, pc=True)   XGBoost only
-    - 08:15 ET: predict_flow(lstm=True,  pc=True)   both
-    - 14:15 ET: predict_flow(lstm=False, pc=True)   XGBoost only
-    - 20:15 ET: predict_flow(lstm=False, pc=True)   XGBoost only
+Local / manual-run orchestration only — this is NOT the production path.
+Production scheduling runs the standalone Cloud Run Job (`wf-daily`) once
+daily at 02:00 ET, triggered by the thin fire-and-forget flow in
+`orchestration/`. This flow exists for local development and ad-hoc/backfill
+runs on a laptop.
 
-LSTM runs only at 08:15 because it needs same-morning IESO actuals (down to
-the previous-day boundary) for its encoder. XGBoost is self-contained — it
-just needs weather — and benefits from the freshest NWP run each cycle.
+Defaults to XGBoost only (`pc=True, lstm=False`) — matching the production
+job, which serves the per-site XGBoost power curve. The LSTM path is dormant
+by default: torch is imported lazily inside `predict_lstm_task`, so the
+XGBoost-only run has no torch dependency. Pass `lstm=True` to run it (requires
+the `[dl]` extra installed) — it stays available as a benchmark model without
+being wired into the default path.
 
-The flow generates one run_timestamp at the start and threads it through
-every downstream task. That's what pairs the weather batch with the
-prediction outputs and (later) with the evaluation.
+The flow generates one run_timestamp at the start and threads it through every
+downstream task. That's what pairs the weather batch with the prediction
+outputs and (later) with the evaluation.
 """
 
 from __future__ import annotations
@@ -26,7 +29,7 @@ from flows.tasks import fetch_forecast_all_task, predict_lstm_task, predict_pc_t
 
 
 @flow(name="wind-forecast-predict")
-def predict_flow(lstm: bool = True, pc: bool = True, run_timestamp: str | None = None):
+def predict_flow(lstm: bool = False, pc: bool = True, run_timestamp: str | None = None):
     """Run the predict pipeline for one batch.
 
     Args:
@@ -46,10 +49,11 @@ def predict_flow(lstm: bool = True, pc: bool = True, run_timestamp: str | None =
     fetch_forecast_all_task(run_timestamp=ts)
 
     # Step 2: run requested model(s). They share the weather batch but are
-    # independent. XGBoost is the DAM-critical model, so it runs first and is
-    # allowed to fail the flow (you want to know if the bid prediction didn't
-    # produce). The LSTM is supplementary, so its failure is captured as a
-    # state and logged — it neither fails the flow nor blocks the XGBoost run.
+    # independent. XGBoost is the production model, so it runs first and is
+    # allowed to fail the flow (you want to know if the prediction didn't
+    # produce). The LSTM is a supplementary benchmark, so its failure is
+    # captured as a state and logged — it neither fails the flow nor blocks
+    # the XGBoost run.
     pc_path = predict_pc_task(run_timestamp=ts) if pc else None
 
     lstm_path = None

@@ -25,7 +25,7 @@ from prefect import get_run_logger, task
 from wind_forecast import storage
 from wind_forecast.evaluate import evaluate_baseline, evaluate_daily
 from wind_forecast.ingest import fetch_actuals, fetch_forecast, fetch_forecast_all, preprocess_ieso
-from wind_forecast.predict import predict, predict_pc
+from wind_forecast.predict import predict_pc
 
 
 # ---------- Ingest ----------
@@ -136,6 +136,8 @@ def predict_lstm_task(run_timestamp: str) -> str:
     """
     logger = get_run_logger()
     logger.info(f"Running LSTM prediction for run_timestamp={run_timestamp}")
+
+    from wind_forecast.predict import predict  # lazy: torch loads only when LSTM actually runs
 
     # Invoke the script's main() via argparse-equivalent — pass everything
     # explicitly so the task is fully deterministic from its arguments.
