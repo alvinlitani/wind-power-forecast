@@ -7,3 +7,4 @@ wf-job-invoker-key.json
 .vscode/settings.json
 *.egg-info/
 __pycache__/
+wandb/
