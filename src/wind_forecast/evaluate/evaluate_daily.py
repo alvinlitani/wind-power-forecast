@@ -27,9 +27,9 @@ Usage:
 
 import argparse
 import csv
-import sys
 
 import pandas as pd
+import numpy as np
 
 from wind_forecast import storage
 
@@ -227,21 +227,24 @@ def run_evaluation(
         print(f"  Encoder end: {encoder_end}, staleness: {staleness}h")
 
     # --- Load IESO actuals ---
+    # Window is widened one day earlier than the prediction start so this same
+    # load also supplies the persistence reference (actual output at the same
+    # hour on D-1). D-1 is the most recent data available when the 02:00 batch
+    # is issued, so the reference is information-fair against the model.
     print("Loading IESO actuals...")
-    date_range = (pred_start.strftime("%Y-%m-%d"), pred_end.strftime("%Y-%m-%d"))
-    actual_df = load_ieso_actuals(ieso_dir, date_range)
+    lag_start = pred_start - pd.Timedelta(days=1)
+    date_range = (lag_start.strftime("%Y-%m-%d"), pred_end.strftime("%Y-%m-%d"))
+    actual_all = load_ieso_actuals(ieso_dir, date_range)
 
-    if actual_df.empty:
+    if actual_all.empty:
         raise RuntimeError(
             "No IESO actuals found for the prediction window (may not be published yet)."
         )
 
-    actual_df = actual_df[
-        (actual_df["datetime"] >= pred_start)
-        & (actual_df["datetime"] <= pred_end)
+    actual_df = actual_all[
+        (actual_all["datetime"] >= pred_start)
+        & (actual_all["datetime"] <= pred_end)
     ]
-    print(f"  {actual_df['generator_id'].nunique()} generators, "
-          f"{len(actual_df)} rows in window")
 
     # --- Load capacity map ---
     capacity_map = load_capacity_map(mapping_path)
@@ -272,6 +275,18 @@ def run_evaluation(
     # ingest) can split metrics per model without ambiguity.
     merged["model"] = model_name
 
+    # --- Persistence reference (naive baseline) ---
+    # Shifting D-1 actuals forward 24h aligns them with the hours predicted.
+    # Note: a 24h shift is calendar-naive, so DST transition days will mismatch
+    # one hour; harmless in practice, worth knowing if a spring/fall run looks odd.
+    lag = actual_all[["datetime", "generator_id", "output_mwh"]].copy()
+    lag["datetime"] = lag["datetime"] + pd.Timedelta(hours=24)
+    lag = lag.rename(columns={"output_mwh": "persist_mwh"})
+    merged = merged.merge(lag, on=["datetime", "generator_id"], how="left")
+    merged["persist_cf"] = merged["persist_mwh"] / merged["capacity_mw"]
+    merged["persist_error_cf"] = merged["persist_cf"] - merged["actual_cf"]
+    merged["persist_abs_error_cf"] = merged["persist_error_cf"].abs()
+
     # --- Per-site metrics ---
     site_metrics = merged.groupby("generator_id").agg(
         mae_cf=("abs_error_cf", "mean"),
@@ -280,15 +295,38 @@ def run_evaluation(
         mean_error_mwh=("error_mwh", "mean"),
         capacity_mw=("capacity_mw", "first"),
         n_hours=("abs_error_cf", "count"),
+        rmse_cf=("error_cf", lambda s: float(np.sqrt((s ** 2).mean()))),
     ).reset_index()
     site_metrics["mae_pct"] = site_metrics["mae_cf"] * 100
     site_metrics["model"] = model_name
     site_metrics = site_metrics.sort_values("generator_id")
 
     # --- Aggregate metrics ---
+    # CF is output/nameplate, so CF-space errors ARE the capacity-normalized
+    # metrics (nMAE / nRMSE) standard in wind power forecasting; x100 for percent.
     agg_mae_cf = merged["abs_error_cf"].mean()
     agg_mae_mwh = merged["abs_error_mwh"].mean()
     agg_mean_error_cf = merged["error_cf"].mean()
+    agg_rmse_cf = float(np.sqrt((merged["error_cf"] ** 2).mean()))
+    agg_rmse_mwh = float(np.sqrt((merged["error_mwh"] ** 2).mean()))
+
+    # --- Skill vs persistence ---
+    # skill = 1 - (model error / reference error). Both sides must be scored on
+    # the SAME rows, so model error is recomputed on the subset where a
+    # persistence value exists rather than reusing the full-window mean.
+    pers = merged.dropna(subset=["persist_cf"])
+    n_rows_persist = int(len(pers))
+    if n_rows_persist > 0:
+        persist_mae_cf = float(pers["persist_abs_error_cf"].mean())
+        persist_rmse_cf = float(np.sqrt((pers["persist_error_cf"] ** 2).mean()))
+        model_mae_matched = float(pers["abs_error_cf"].mean())
+        model_rmse_matched = float(np.sqrt((pers["error_cf"] ** 2).mean()))
+        skill_mae = 1.0 - (model_mae_matched / persist_mae_cf) if persist_mae_cf > 0 else None
+        skill_rmse = 1.0 - (model_rmse_matched / persist_rmse_cf) if persist_rmse_cf > 0 else None
+    else:
+        persist_mae_cf = persist_rmse_cf = None
+        model_mae_matched = model_rmse_matched = None
+        skill_mae = skill_rmse = None
 
     # --- Save outputs ---
     # Subdirectory per model so LSTM/XGB eval files don't collide
@@ -324,6 +362,21 @@ def run_evaluation(
     print(f"  Aggregate MAE (CF):  {agg_mae_cf:.4f} ({agg_mae_cf*100:.2f}%)")
     print(f"  Aggregate MAE (MWh): {agg_mae_mwh:.2f}")
     print(f"  Mean bias (CF):      {agg_mean_error_cf:+.4f} ({agg_mean_error_cf*100:+.2f}%)")
+    print(f"  Aggregate RMSE (CF): {agg_rmse_cf:.4f} ({agg_rmse_cf*100:.2f}%)")
+    print(f"  Aggregate RMSE (MWh):{agg_rmse_mwh:.2f}")
+    print(f"")
+    if n_rows_persist > 0:
+        print(f"  --- vs persistence (same-hour D-1), {n_rows_persist} matched rows ---")
+        print(f"  Persistence nMAE:    {persist_mae_cf*100:.2f}%")
+        print(f"  Persistence nRMSE:   {persist_rmse_cf*100:.2f}%")
+        print(f"  Model nMAE (matched):{model_mae_matched*100:.2f}%")
+        if skill_mae is not None:
+            verdict = "better than naive" if skill_mae > 0 else "no better than naive"
+            print(f"  Skill score (MAE):   {skill_mae:+.3f}  ({verdict})")
+        if skill_rmse is not None:
+            print(f"  Skill score (RMSE):  {skill_rmse:+.3f}")
+    else:
+        print(f"  No persistence reference available (D-1 actuals missing).")
     print(f"")
     print(f"{'Generator':<28} {'MAE (MWh)':>10} {'Capacity':>10} {'MAE %':>8}")
     print(f"{'-'*65}")
@@ -351,6 +404,15 @@ def run_evaluation(
         "prediction_window_start": str(pred_start),
         "prediction_window_end": str(pred_end),
         "staleness_hours": float(staleness) if staleness is not None else None,
+        "nmae_pct": float(agg_mae_cf * 100),
+        "rmse_cf": agg_rmse_cf,
+        "rmse_mwh": agg_rmse_mwh,
+        "nrmse_pct": float(agg_rmse_cf * 100),
+        "persistence_nmae_pct": float(persist_mae_cf * 100) if persist_mae_cf is not None else None,
+        "persistence_nrmse_pct": float(persist_rmse_cf * 100) if persist_rmse_cf is not None else None,
+        "skill_score_mae": skill_mae,
+        "skill_score_rmse": skill_rmse,
+        "n_rows_persistence": n_rows_persist,
         "detail_path": detail_path,
         "summary_path": summary_path,
     }

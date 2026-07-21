@@ -28,7 +28,6 @@ Usage:
 
 import argparse
 import csv
-import sys
 
 import pandas as pd
 
@@ -51,8 +50,7 @@ def load_ieso_forecast_and_output(
     csv_files = sorted(storage.glob(f"{ieso_dir.rstrip('/')}/*.csv"))
 
     if not csv_files:
-        print(f"No IESO CSV files found in {ieso_dir}")
-        sys.exit(1)
+        raise FileNotFoundError(f"No IESO CSV files found in {ieso_dir}")
 
     for f in csv_files:
         df = storage.read_csv(f)

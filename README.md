@@ -200,7 +200,52 @@ python -m wind_forecast.evaluate.evaluate_daily \
 - Anomaly handling is rule-based (e.g., BOW LAKE excluded for months with mean output exactly zero while available capacity is positive). A statistical anomaly detector is out of scope for v1.
 
 ---
+# Evaluation metrics — note for README
 
+## Why these metrics
+
+Normalized error metrics (nMAE, nRMSE), normalized by rated capacity, are the
+standard reporting metrics in the wind power forecasting literature — the
+normalization is what makes error comparable across farms of different sizes.
+Because this project predicts capacity factor (output ÷ nameplate), CF-space
+errors are already the normalized quantities.
+
+A naive persistence forecast is the conventional reference model, and skill
+score (1 − model_error / reference_error) is the recommended accompanying
+metric. Skill score is not standalone — it is defined relative to a reference,
+which is why persistence is logged alongside it.
+
+Persistence here = actual output at the same hour on the previous day. This is
+information-fair: when the 02:00 batch is issued, D-1 actuals are the most
+recent data available.
+
+MAPE is deliberately NOT used — it degrades badly at small or zero generation,
+and ~21% of site-hours in the IESO data have zero output.
+
+## Forecast horizon labelling
+
+All reported metrics are for **24h-ahead, hourly** forecasts. The literature
+stresses stating the horizon explicitly; metrics are meaningless without it.
+
+## Why the IESO GOCR Forecast column is NOT used as a baseline
+
+The Forecast column in the Generator Output and Capability Report is not a
+day-ahead product. Measured against the Output column over July 2026 it shows
+~1.6% MAE of capacity, with error scaling by ramp size (1.5 MWh MAE on flat
+hours vs 4.5 MWh on 20+ MW ramps) and near-zero bias — the profile of a
+very-short-lead forecast informed by live telemetry, not a 24h-ahead one. The
+archived monthly report also contains no forward-looking rows, so a day-ahead
+IESO forecast cannot be recovered from it retroactively.
+
+Comparing a 24h-ahead model against it would be a lead-time mismatch in either
+direction. The GOCR remains ground truth via the Output column; only the
+Forecast column is unsuitable as a comparator.
+
+IESO's Variable Generation Forecast Summary (48h ahead) would be lead-time
+comparable, but publishes provincial/zonal totals rather than per-generator
+values — usable only against the Ontario aggregate. Noted as future work.
+
+---
 ## License
 
 TBD
