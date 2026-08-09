@@ -1,71 +1,43 @@
-# Wind Power Forecasting — Ontario
+# Wind Power Forecasting (Ontario)
 
-Hourly wind power forecasts for the 45 IESO-regulated Ontario wind sites, running in production on a daily schedule. A per-site XGBoost power curve consumes NWP weather forecasts and writes 24-hour predictions to cloud storage; a FastAPI service reads them back.
+Daily hourly forecasts of wind generation for all 45 IESO-reporting wind sites in Ontario. Per-site XGBoost models turns forecasts for the next 24 hours of weather conditions into predicted energy output which is written to cloud storage. Access is provided through a small FastAPI service hosted on Google Cloud Run.
 
-The project is built for production discipline rather than notebook results:
-storage abstraction that runs unchanged on a laptop or in the cloud, fail-closed
-data-quality gates, a thin external control plane, and evaluation against a
-documented reference model. Everything described under **What runs today** is
-deployed and verified; everything else is on the roadmap and marked as such.
+My goal is to have this project built using production environment practices rather than demo standards. There is scheduling that runs on Prefect Cloud. Accuracy is logged into Weights and Biases (W&B) against a persistence baseline which is the conventional reference for wind forecast skill scores.
 
----
+## What is running today
 
-## What runs today
+A single Cloud Run Job (`wind-forecast-job` running the `wf-daily` entry point) is triggered daily at 02:00 ET. It fetches weather for 45 sites, runs 45 XGBoost models, and writes predictions as CSV to Google Cloud Storage. Prefect Cloud have the schedule and triggers the job. The job is deliberately made lightweight and usually executes under a minute each run.
 
-| | |
-|---|---|
-| **Scheduled** | One run daily at 02:00 ET (`wf-daily`: weather fetch → XGBoost predict) |
-| **Compute** | Cloud Run Job, triggered by Prefect Cloud (Managed pool) |
-| **Storage** | GCS — `wind-forecast-ontario-data`, `wind-forecast-ontario-models` |
-| **Serving** | FastAPI on Cloud Run, four endpoints, reading predictions from GCS |
-| **Evaluation** | Manual 3-step workflow, logged to Weights & Biases |
-| **Live model** | Per-site XGBoost power curve (45 models) |
+A separate Cloud Run service reads the CSVs and serves the results at API (`wind-forecast-api`) endpoints. 
 
-**Not yet running:** CI/CD, infrastructure as code, scheduled evaluation, and the
-sequence model. See [Roadmap](#roadmap).
+Evaluation runs on my local machine and logs to Weights & Biases. 
 
----
-
-## At a glance
+## Summarized numbers
 
 | | |
 |---|---|
-| **Domain** | Wind power generation forecasting, Ontario, Canada |
-| **Sites** | 45 IESO-regulated wind farms, **4,943 MW** combined nameplate |
-| **Fleet coverage** | ~90% of Ontario's ~5.5 GW installed wind capacity |
-| **Site size range** | 20 MW – 270 MW |
-| **Forecast horizon** | 24 hours ahead, hourly resolution |
-| **Live model** | Per-site XGBoost power curve, capacity-factor target |
-| **Refresh** | 1×/day, 02:00 ET |
-| **Training data** | 2023–2024 forecast weather, ~17,500 hours per site |
-| **Held-out test** | Full-year 2025, 8,756 hours per site |
-| **Offline nMAE** | 11.84% of rated capacity (per-site-equal weighting) |
-| **Live nMAE** | 7.9% – 20.2% per batch, capacity-weighted (July 2026, n=4 days) |
-| **Stack** | XGBoost · pandas · Prefect Cloud · FastAPI · Cloud Run · GCS · W&B |
+| Sites | 45, totalling 4,943 MW |
+| Coverage | ~90% of Ontario's ~5.5 GW of installed wind |
+| Site sizes | 20 MW to 270 MW |
+| Horizon | Rolling 24 hours ahead, hourly |
+| Model | Per-site XGBoost power curve, capacity factor target |
+| Training | 2023–2024 forecast weather, 17,520 hours per site |
+| Validation | None with hyperparameters untuned (see below) |
+| Test | Full-year 2025, 394,006 site-hours (~8,756 per site).   |
+| Offline nMAE | 11.84% per-site-equal, 11.31% capacity-weighted |
+| Live nMAE | 6.2% to 19.5% capacity-weighted (median 8.0%), across 13 full-window batches, 18 Jul – 2 Aug 2026 |
+| Stack | XGBoost, pandas, Prefect Cloud, FastAPI, Cloud Run, GCS, W&B |
 
-The roster is defined by the IESO Generator Output and Capability Report, which
-covers market-participant generators of 20 MW or greater and excludes
-distribution-connected generation. The ~560 MW gap between the 4,943 MW covered
-here and the provincial ~5.5 GW is embedded and sub-20 MW capacity that the data
-source does not report. The smallest site in the roster is exactly 20.0 MW.
+The roster is every site included in the [IESO Generator Output and Capability Report](https://reports-public.ieso.ca/public/GenOutputCapabilityMonth/) which covers market-participant generators of 20 MW or more. Embedded and sub-20 MW wind generators do not appear in the report which explains the ~560 MW gap against the provincial total. The [IESO Active Contracted Generation List](https://www.ieso.ca/-/media/Files/IESO/Document-Library/power-data/supply/IESO-Active-Contracted-Generation-List.xlsx) have 59 wind generator sites that are sub-20 MW with total capacity of around ~533 MW.
+
+I did not perform validation split. A separate validation set exists to choose from candidate models using different hyperparameter settings, feature sets, stopping points. This project is trained on one configuration that is chosen in advance from values in common use: n_estimators=100 and max_depth=6 are XGBoost's defaults, learning_rate=0.1 for conservative learning rate, random_state=42 for reproducibility. The 2025 test set was scored once.
 
 ---
 
 ## Why this problem
 
-Ontario operates a competitive wholesale electricity market. Wind is
-non-dispatchable and variable, so forecast error propagates directly into
-balancing costs for the system operator and into revenue variance for
-generators. Across a 4,943 MW fleet, a 1% forecast error corresponds to roughly
-**49 MW** of unexpected generation in a given hour — material at grid scale.
 
-This project produces a rolling 24-hour-ahead forecast issued at 02:00 ET. That
-is an operational and intraday-positioning horizon. It is *not* aligned to
-Ontario's day-ahead market: DAM bids close at 10:00 ET and cover the 24 hours of
-the *following* day, so a day-ahead product would need to forecast 22–46 hours
-ahead. Extending to that horizon is a roadmap item, and because the model carries
-no lead-time features it is a configuration change rather than a retrain — see
-[Roadmap](#roadmap).
+
 
 ---
 
