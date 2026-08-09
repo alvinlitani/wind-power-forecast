@@ -1,6 +1,10 @@
 # Wind Power Forecasting (Ontario)
 
-Daily hourly forecasts of wind generation for all 45 IESO-reporting wind sites in Ontario. Per-site XGBoost models turns forecasts for the next 24 hours of weather conditions into predicted energy output which is written to cloud storage. Access is provided through a small FastAPI service hosted on Google Cloud Run.
+Daily hourly forecasts of wind generation output for all 45 IESO-reporting wind sites in Ontario. Per-site XGBoost models turns forecasts for the next 24 hours of weather conditions into predicted energy output which is written to cloud storage. Access is provided through a small FastAPI service hosted on Google Cloud Run.
+
+You can test the API at the following endpoints:
+- [24-hour per-site output forecast starting at 3 AM](https://wind-forecast-api-654769911920.us-central1.run.app/predictions/latest)
+- [24-hour total Ontario output forecast starting at 3 AM](https://wind-forecast-api-654769911920.us-central1.run.app/predictions/ontario)
 
 My goal is to have this project built using production environment practices rather than demo standards. There is scheduling that runs on Prefect Cloud. Accuracy is logged into Weights and Biases (W&B) against a persistence baseline which is the conventional reference for wind forecast skill scores.
 
@@ -18,7 +22,7 @@ Evaluation runs on my local machine and logs to Weights & Biases.
 |---|---|
 | Sites | 45, totalling 4,943 MW |
 | Coverage | ~90% of Ontario's ~5.5 GW of installed wind |
-| Site sizes | 20 MW to 270 MW |
+| Site Output | 20 MW to 270 MW |
 | Horizon | Rolling 24 hours ahead, hourly |
 | Model | Per-site XGBoost power curve, capacity factor target |
 | Training | 2023–2024 forecast weather, 17,520 hours per site |
@@ -35,7 +39,6 @@ I did not perform validation split. A separate validation set exists to choose f
 ---
 
 ## Why this problem
-
 
 
 
@@ -525,6 +528,12 @@ Next:
 
 ---
 
-## License
+## MIT License
 
-MIT — see [LICENSE](LICENSE).
+Copyright (c) <2026> 
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
