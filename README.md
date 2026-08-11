@@ -110,66 +110,44 @@ There are two ways Prefect can run jobs on Google Cloud Run. A push pool creates
 |---|---|---|
 | 02:00 | `wf-daily` | Weather fetch → XGBoost predict → write CSV to GCS |
 
-02:00 ET was chosen to clear Open-Meteo's 00Z publish lag (~3–5 hours). Earlier
-slots risk being served the previous 18Z cycle.
-
-The prediction window runs 03:00 on the run date through 02:00 the following day,
-so it straddles midnight. Because IESO actuals publish with roughly a one-day
-lag, a batch becomes fully evaluable about **two days** after it runs.
+Many weather models used by Open-Meteo have a [daily schedule](https://wethr.net/model-schedule) of running at 00, 06, 12, 18 UTC and they publish a few hours after that. This project aims to fetch the fresh weather forecast after the 00 run. 
 
 ---
 
-## Modeling choices
+## Modeling
 
-### Capacity factor as the target
+## Capacity factor as the target
 
-The model predicts capacity factor (output ÷ nameplate) rather than raw MWh.
-Across sites spanning 20 MW to 270 MW — a 13.5× range — this is what makes error
-comparable between sites and prevents large sites from dominating any pooled
-metric. Predictions are converted back to MWh at serving time using per-site
-nameplate.
+The model predicts capacity factor (output ÷ nameplate) rather than raw MWh. The sites' capacity range between 20 MW to 270 MW which is a large 13.5× range. Predicting CF keeps error comparable between them and stops the big sites dominating any pooled number. Conversion back to MWh happens at serving time.
 
-### Train on forecast weather, not reanalysis
+## Train on forecast weather, not actual weather data
 
-Training uses Open-Meteo's Historical Forecast API — what the forecast *was* for
-each historical hour — rather than reanalysis of what the weather actually did.
-This matches the conditions the model sees at inference and avoids the silent
-domain-shift failure where a model trained on near-perfect weather degrades
-sharply when handed real forecasts in production.
+In production, the model will have to use weather forecast for inference and not actual weather data. Therefore, I trained the model using Open-Meteo's Historical Forecast API instead of Historical Weather API. This also avoids the potential failure mode of the model trained on near-perfect data performing sharply worse in production.
 
-### Feature inclusion discipline
+## Feature selection 
 
-Features were included only where they carry signal not already present in
-existing inputs. Candidates tested and excluded, with reasons:
+Turbine power is calculated by the equation: 1/2 × ρ (air density) × A (rotor swept area) × V^3 (wind speed) × Cp (power coefficient).
 
-- **Wind direction** — yaw-controlled turbines make raw direction largely
-  irrelevant to output.
-- **Site elevation** — already reflected in NWP wind speed at height and in
-  pressure/temperature.
-- **Distance to water** — the mechanism (wind enhancement near large water
-  bodies) is already an input to the NWP model itself.
-- **Air density** — derivable from temperature and pressure, both present.
-- **Boundary layer height** — not available pre-2025 in the Open-Meteo
-  Historical Forecast API.
+Two features relating to air density which are temperature and surface pressure is included. Humidity is excluded as it contributes very little to the variability of air density compared to the other two features.
 
-Inputs to the live XGBoost path, per site per hour: `wind_speed_80m`,
-`wind_speed_120m`, `temperature_2m`, `surface_pressure`.
+Other excluded features which were considered:
 
-### Hub-height handling
+- **Wind direction**: yaw-controlled turbines make raw direction largely irrelevant to output.
+- **Site elevation**:  already reflected in wind speed at height and in pressure/temperature.
+- **Distance to water**: the mechanism (wind enhancement near large water bodies) is already reflected in wind speed.
+- **Air density**: derivable from temperature and pressure, both present.
 
-The XGBoost path deliberately does **not** extrapolate wind speed to hub height.
-Each per-site model receives the 80 m and 120 m levels directly and learns the
-mapping for its own site, which avoids committing to a fixed shear coefficient
-across 45 sites with different terrain.
+Features for the live model per site per hour: `wind_speed_80m`, `wind_speed_120m`, `temperature_2m`, `surface_pressure`.
 
-One caveat: fleet hub heights span 78–132 m, so for the tallest sites the two
-levels sit below hub height rather than bracketing it. The model extrapolates
-from below in those cases, which is a modelling choice rather than an
-interpolation.
+## Hub-height handling
 
-The offline LSTM path handles this differently — it interpolates to hub height
-using a log wind profile. The two approaches are not interchangeable, and the
-feature description above applies to the live XGBoost path only.
+I considered extrapolating/interpolating the two wind speed features to calculate hub-height wind speed but decided against it.
+
+Each per-site model receives the 80m and 120m speeds directly and learns the mapping for its own site. The alternative is using a shear coefficient and applying it to calculate hub-height wind speed across 45 sites with very different terrain. 
+
+Some sites also have turbines at different heights which make it impossible to use only one height to represent it.
+
+Hub heights across the fleet run 78m to 132m with data taken from [Canadian Wind Turbine Database](https://open.canada.ca/data/en/dataset/79fdad93-9025-49ad-ba16-c26d718cc070).
 
 ---
 
