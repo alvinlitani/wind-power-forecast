@@ -1,12 +1,26 @@
 # Wind Power Forecasting (Ontario)
 
-Daily hourly forecasts of wind generation output for all 45 IESO-reporting wind sites in Ontario. Per-site XGBoost models turns forecasts for the next 24 hours of weather conditions into predicted energy output which is written to cloud storage. Access is provided through a small FastAPI service hosted on Google Cloud Run.
+Daily hourly forecasts of wind generation output for all 45 IESO-reporting wind generator plants in Ontario. Per-site XGBoost models turns forecasts for the next 24 hours of weather conditions into predicted energy output which is written to cloud storage. Access is provided through a small FastAPI service hosted on Google Cloud Run.
 
 You can test the API at the following endpoints:
 - [24-hour per-site output forecast starting at 3 AM](https://wind-forecast-api-654769911920.us-central1.run.app/predictions/latest)
 - [24-hour total Ontario output forecast starting at 3 AM](https://wind-forecast-api-654769911920.us-central1.run.app/predictions/ontario)
 
 My goal is to have this project built using production environment practices rather than demo standards. There is scheduling that runs on Prefect Cloud. Accuracy is logged into Weights and Biases (W&B) against a persistence baseline which is the conventional reference for wind forecast skill scores.
+
+## Why this problem
+
+To maintain grid stability, the baseload power must be able to cover energy demand if the renewable energy sites with variable output produce less than expected. In Ontario, baseload power is provided by nuclear, hydro, and gas. According to [IESO data](https://www.ieso.ca/Learn/Ontario-Electricity-Grid/Supply-Mix-and-Generation), the share of total capacity provided by wind is 13% while the combined baseload is about 82%. 
+
+Wind energy output is variable and dependent on weather. However, the output is not all absorbed by the Ontario grid. The IESO issues dispatch instructions meaning its scheduling algorithm sets the expected energy output of each generator sites. The plant report the amount that it can produce in current condition and the IESO schedules the output taking into account the grid condition. 
+
+For renewable energy like solar and wind, dispatch instructions can only runs downwards (curtailment) since you can not instruct the generator sites to produce more if the weather conditions do not allow it while the output can be restricted. The reason for curtailment is that during times of surplus baseload generation, the market already clears and does not need additional capacity provided by the renewable plants.
+
+The IESO already has made variable energy forecasting available to market participants. The [forecast summary](https://reports-public.ieso.ca/public/VGForecastSummary/PUB_VGForecastSummary.xml) is done for the next 48 hours and refreshes hourly. The forecast summary is not granular since it is broken down into electrical zones (not per-site) and not all the zones are covered.  The reason that some zones are not covered may be that there are too few plants are in the region and therefore the summary can be broken down into individual sites' expected output. The per-site forecast in the [IESO Generator Output and Capability Report](https://reports-public.ieso.ca/public/GenOutputCapabilityMonth/) is given out retroactively on the next day.
+
+This project aims to give granular per-site forecast for market participants beforehand for all IESO-covered wind generators.
+
+---
 
 ## What is running today
 
@@ -30,7 +44,7 @@ Evaluation runs on my local machine and logs to Weights & Biases.
 | Test | Full-year 2025, 394,006 site-hours (~8,756 per site).   |
 | Offline nMAE | 11.84% per-site-equal, 11.31% capacity-weighted |
 | Live nMAE | 6.2% to 19.5% capacity-weighted (median 8.0%), across 13 full-window batches, 18 Jul – 2 Aug 2026 |
-| Stack | XGBoost, pandas, Prefect Cloud, FastAPI, Cloud Run, GCS, W&B |
+| Stack | XGBoost, pandas, Prefect Cloud, FastAPI, Cloud Run, GCS, W&B, OpenMeteo |
 
 The roster is every site included in the [IESO Generator Output and Capability Report](https://reports-public.ieso.ca/public/GenOutputCapabilityMonth/) which covers market-participant generators of 20 MW or more. Embedded and sub-20 MW wind generators do not appear in the report which explains the ~560 MW gap against the provincial total. The [IESO Active Contracted Generation List](https://www.ieso.ca/-/media/Files/IESO/Document-Library/power-data/supply/IESO-Active-Contracted-Generation-List.xlsx) have 59 wind generator sites that are sub-20 MW with total capacity of around ~533 MW.
 
@@ -38,75 +52,59 @@ I did not perform validation split. A separate validation set exists to choose f
 
 ---
 
-## Why this problem
-
-
-
----
-
 ## Architecture
 
-Prefect is a thin external control plane: it holds the schedule and triggers a
-named Cloud Run Job, and nothing else. The Job itself is orchestration-agnostic
-and torch-free — it can be invoked by `gcloud`, by Prefect, or by anything that
-can call the Cloud Run API. Serving is decoupled from prediction: the API reads
-pre-computed CSVs and never runs inference.
+Prefect is deliberately thin. It has the schedule and triggers a named Cloud Run Job. The Job itself does not import Prefect nor torch. It is also orchestration-agnostic as it can be triggered by Prefect, by `gcloud', or by anything else that can hit the Cloud Run API. 
+
+Serving is made separate with the API reading pre-computed CSV files and never runs a model.
 
 ```
-                  ┌──────────────────────┐
-                  │   Prefect Cloud      │  Schedule (02:00 ET) + UI
-                  │   (control plane)    │  Managed pool `wf-managed`
-                  └──────────┬───────────┘
-                             │ fire-and-forget: run.jobs.run
-                             ▼
-                  ┌──────────────────────┐
-                  │  Cloud Run Job       │  `wind-forecast-job`
-                  │  `wf-daily`          │  fetch weather → XGBoost predict
-                  └──────────┬───────────┘
-                             │
-                             ▼
-       ┌──────────────────────────────────────────┐
-       │              GCS (storage)               │
-       │  ─────────────────────────────────────   │
-       │  wind-forecast-ontario-data/             │
-       │    mapping.csv                           │
-       │    raw/ieso/, processed/ieso/,           │
-       │    predictions/{pc,lstm,weather}/,       │
-       │    evaluations/{pc,lstm}/                │
-       │                                          │
-       │  wind-forecast-ontario-models/           │
-       │    pc/ (XGBoost), cf/ (LSTM, offline)    │
-       └──────────────────────────────────────────┘
-                             ▲
-                             │ reads
-                  ┌──────────┴───────────┐
-                  │   Cloud Run          │  `wind-forecast-api`
-                  │   (serving)          │  /health
-                  │                      │  /predictions/latest
-                  │                      │  /predictions/{site}
-                  │                      │  /predictions/ontario
-                  └──────────────────────┘
+      ┌──────────────────────┐
+      │   Prefect Cloud      │  Schedule (02:00 ET) + UI
+      │   (orchestrator)     │  
+      └──────────┬───────────┘
+                 │ triggers
+                 v
+      ┌──────────────────────┐
+      │  Cloud Run Job       │  `wind-forecast-job`
+      │  `wf-daily`          │  fetch weather → XGBoost predict
+      └──────────┬───────────┘
+                 │ writes to
+                 v
+┌──────────────────────────────────────────┐
+│        Google Cloud Storage              │
+│                                          │
+│  wind-forecast-ontario-data/             │
+│    mapping.csv                           │
+│    raw/ieso/, processed/ieso/,           │
+│    predictions/{pc,lstm,weather}/,       │
+│    evaluations/{pc,lstm}/                │
+│                                          │
+│  wind-forecast-ontario-models/           │
+│    pc/ (XGBoost), cf/ (LSTM, offline)    │
+└──────────────────────────────────────────┘
+                 ^
+                 │ reads
+      ┌──────────┴───────────┐
+      │   Cloud Run Service  │  `wind-forecast-api`
+      │                      │  /health
+      │                      │  /predictions/latest
+      │                      │  /predictions/{site}
+      │                      │  /predictions/ontario
+      └──────────────────────┘
 ```
 
-### Why fire-and-forget
+## Why fire-and-forget
 
-The Prefect flow triggers the Job and returns immediately rather than polling to
-completion. The Hobby tier caps compute at 500 minutes/month; blocking on a
-~15-minute Job would consume roughly 90% of that budget on waiting. The tradeoff
-is that runtime failures surface in Cloud Run execution history rather than in
-Prefect run state — acceptable because the Job's own gates fail loudly and
-`--max-retries 1` re-runs the whole pipeline on failure.
+The trigger flow fires and does not wait for response. This avoids making the trigger a state machine and keeps the trigger a single atomic API call. The advantages are that no need to tune timeout period and no polling failure leading to re-triggering a job that was still running. The run does not depend on the connection between the orchestrator and the job staying up for its duration. The job currently executes about less than 5 minutes per run and the connection is honestly fine for that short period of time. However, I want to make this architecture more robust by reducing the chance of failure. 
 
-### Why a Managed pool
+The main tradeoff is that a Prefect run is recorded successful when the trigger is accepted even when the job fails. Runtime failures appear in the Cloud Run's execution history but not in Prefect's history so Prefect does not send alert on them.
 
-Prefect's Cloud Run *push* work pool creates ephemeral jobs from an image
-reference; it cannot invoke a pre-existing named Job. The Managed pool can, via
-`pip_packages` carrying `google-cloud-run`. This keeps the Job as the single
-deployable unit of compute and the credential scope minimal: the Prefect service
-account holds a custom role with `run.jobs.run` and `run.jobs.get` only, bound at
-the job resource rather than the project.
+## Why a Managed pool for Prefect
 
-### Schedule
+There are two ways Prefect can run jobs on Google Cloud Run. A push pool creates a brand new Cloud Run Job for each run and deletes it afterwards. It can not call a job that already exists. I wanted the opposite with one job that is already deployed and can be triggered in multiple ways. Therefore I use a managed pool where my flow code calls the Cloud Run API itself.
+
+## Schedule
 
 | Time (ET) | Job | Contents |
 |---|---|---|
@@ -351,6 +349,12 @@ yet implemented.
 ---
 
 ## Data quality gates
+
+I want to ensure that the runtime fails completely rather than having corrupted data. There are several failure gates:
+- Fetch stage: all generator sites must have weather forecasts for the next 24 hours. Recovery is done by retrying fetch for particular sites but missing sites are not tolerated.
+- Predict stage: all generator sites must have predictions for the next 24 hours.
+- Serving stage: all the sites must be in the pre-computed CSV file. This is to ensure failures happening in mid-write process is caught.
+
 
 The pipeline fails closed rather than emitting a plausible-looking but incomplete
 batch. Each gate raises rather than exiting, so failures are visible to the
