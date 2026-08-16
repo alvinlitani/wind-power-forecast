@@ -32,7 +32,7 @@ Evaluation runs on my local machine and logs to Weights & Biases.
 
 ## Summarized numbers
 
-| | |
+| Parameters | |
 |---|---|
 | Sites | 45, totalling 4,943 MW |
 | Coverage | ~90% of Ontario's ~5.5 GW of installed wind |
@@ -108,7 +108,7 @@ There are two ways Prefect can run jobs on Google Cloud Run. A push pool creates
 
 | Time (ET) | Job | Contents |
 |---|---|---|
-| 02:00 | `wf-daily` | Weather fetch → XGBoost predict → write CSV to GCS |
+| 02:00 | `wf-daily` | Weather fetch -> XGBoost predict -> write CSV to GCS |
 
 Many weather models used by Open-Meteo have a [daily schedule](https://wethr.net/model-schedule) of running at 00, 06, 12, 18 UTC and they publish a few hours after that. This project aims to fetch the fresh weather forecast after the 00 run. 
 
@@ -134,64 +134,47 @@ Other excluded features which were considered:
 
 - **Wind direction**: yaw-controlled turbines make raw direction largely irrelevant to output.
 - **Site elevation**:  already reflected in wind speed at height and in pressure/temperature.
-- **Distance to water**: the mechanism (wind enhancement near large water bodies) is already reflected in wind speed.
-- **Air density**: derivable from temperature and pressure, both present.
+- **Distance to water**: the phenomenon of increased wind near large water bodies is already reflected in wind speed.
+- **Air density**: derivable from already included temperature and pressure.
 
 Features for the live model per site per hour: `wind_speed_80m`, `wind_speed_120m`, `temperature_2m`, `surface_pressure`.
 
 ## Hub-height handling
 
-I considered extrapolating/interpolating the two wind speed features to calculate hub-height wind speed but decided against it.
+I considered extrapolating/interpolating the two wind speed features to calculate hub-height wind speed per site but decided against it.
 
 Each per-site model receives the 80m and 120m speeds directly and learns the mapping for its own site. The alternative is using a shear coefficient and applying it to calculate hub-height wind speed across 45 sites with very different terrain. 
 
-Some sites also have turbines at different heights which make it impossible to use only one height to represent it.
-
-Hub heights across the fleet run 78m to 132m with data taken from [Canadian Wind Turbine Database](https://open.canada.ca/data/en/dataset/79fdad93-9025-49ad-ba16-c26d718cc070).
+Some sites also have turbines at different heights which make it impossible to use only one height to represent it. Hub heights across the fleet run 78m to 132m with the data taken from [Canadian Wind Turbine Database](https://open.canada.ca/data/en/dataset/79fdad93-9025-49ad-ba16-c26d718cc070).
 
 ---
 
 ## Evaluation
 
-### Metrics and why these
+## Metrics
 
-Normalized error metrics — nMAE and nRMSE, normalized by rated capacity — are the
-standard in wind power forecasting literature; the normalization is what makes
-error comparable across farms of different sizes. Because this project predicts
-capacity factor, CF-space errors are already the normalized quantities.
+The standard error metrics used in wind energy forecasting are normalized because it allows us to compare error across plants of different sizes. The normalized mean absolute error (nMAE) and normalized root mean square error (nRMSE) values are used to compare the error rate between predicted and actual values of the plants' capacity factor. 
 
-A naive **persistence** forecast is the conventional reference model, and skill
-score (1 − model error ÷ reference error) is the recommended accompanying metric.
-Skill score is not standalone — it is defined relative to a reference, which is
-why persistence is logged beside it. Persistence here is actual output at the
-same hour on the previous day, which is information-fair: when the 02:00 batch is
-issued, D-1 actuals are the most recent data available.
+Mean absolute percentage error (MAPE) is deliberately not used. It degrades badly at small or zero generation and roughly a fifth of site-hours in the IESO data have zero output.
 
-MAPE is deliberately not used. It degrades badly at small or zero generation, and
-roughly 21% of site-hours in the IESO data have zero output.
+A baseline is needed for comparison and a naive persistence model is the conventional reference for renewable energy outputs. Persistence model assumes the predicted value of the previous time step (yesterday) will be the same for the next time step (today). This means the energy output of a particular site at 1 PM today will be the same as yesterday. The accompanying skill score value (1 - (forecast / reference)) is also logged with it.
 
-All reported metrics are for **24-hour-ahead, hourly** forecasts. The horizon is
-stated explicitly everywhere because normalized metrics are not interpretable
-without it.
+The reported metrics are for hourly forecasts for the next 24 hours starting from 3 AM.
 
-### Two aggregations, two questions
+## Three ways of aggregation
 
-Error is reported under two weightings because they answer different questions:
+Error is reported in three ways because they answer different questions:
 
-- **Capacity-weighted nMAE** — Σ|error| ÷ Σ capacity. The portfolio-normalized
-  figure standard in the literature. *How much error per MW installed?*
-- **Fleet-aggregate nMAE** — generation summed across sites first, then error
-  measured. Over- and under-prediction at different sites cancel. *How much
-  error does the portfolio as a whole bear?*
+- **Fleet-aggregate nMAE** : sums generation and prediction separately across all sites then measures the difference/error. Over-prediction at one site cancels under-prediction at another one. How accurate is the prediction for the whole fleet?
+- **Capacity-weighted per hour**: divide the sum of error by the sum of capacity. Big sites dominate because they contribute more MW to both sides. This is the standard roster-normalized figure in the literature. How much error per MW installed?
+- **Per-site-equal**: calculate each site's error as a percentage of its own capacity then average all the percentages. Which sites have the best and worst predictions?
 
-A third weighting — every site-hour counted equally — is retained for per-site
-analysis, where it surfaces which sites are weakest. It is not used as a headline
-figure.
 
-Fleet-aggregate error is substantially lower than per-site error and the two are
-not interchangeable. Both are logged; neither is presented alone.
+### Why not the Generator Output and Capability Report Forecast column as the baseline
 
-### Why the IESO GOCR Forecast column is not a baseline
+
+
+---
 
 The Generator Output and Capability Report contains a Forecast column, but it is
 not a day-ahead product. Measured against the Output column over July 2026 it
@@ -212,6 +195,16 @@ IESO's Variable Generation Forecast Summary (48 hours ahead) would be
 lead-time-comparable, but publishes provincial and zonal totals rather than
 per-generator values — usable against the fleet aggregate only. Noted as future
 work.
+
+---
+
+The GOCR has a Forecast column and it would be very convenient to benchmark against it. It isn't a day-ahead forecast, though. Checked against the Output column over July 2026 it sits at about 1.6% MAE of capacity with essentially no bias, and its error scales with ramp size — around 1.5 MWh on flat hours against 4.5 MWh when output moves 20+ MW hour over hour. It also misses badly at outages. That's a short-lead forecast fed by live telemetry, not something issued 24 hours out.
+
+The archived monthly file has no forward-looking rows either, so there's no way to recover a day-ahead IESO forecast retroactively, and snapshotting the file daily wouldn't help — each snapshot just adds another finished day.
+
+Comparing against it would be a lead-time mismatch whichever way the result went, so I don't. The Output column is still ground truth and that's what I score against.
+
+The Variable Generation Forecast Summary runs 48 hours ahead and would be lead-time comparable, but it publishes zonal totals only. That would benchmark the fleet aggregate, not individual sites. It's on the roadmap.
 
 ### Offline results — full-year 2025 held-out test
 
