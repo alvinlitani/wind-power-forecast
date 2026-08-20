@@ -6,7 +6,7 @@ You can test the API at the following endpoints:
 - [24-hour per-site output forecast starting at 3 AM](https://wind-forecast-api-654769911920.us-central1.run.app/predictions/latest)
 - [24-hour total Ontario output forecast starting at 3 AM](https://wind-forecast-api-654769911920.us-central1.run.app/predictions/ontario)
 
-My goal is to have this project built using production environment practices rather than demo standards. There is scheduling that runs on Prefect Cloud. Accuracy is logged into Weights and Biases (W&B) against a persistence baseline which is the conventional reference for wind forecast skill scores.
+My goal is to have this project built using production environment practices rather than demo standards. There is scheduling that runs on Prefect Cloud. The accuracy is logged into Weights and Biases (W&B) against a persistence baseline which is the conventional reference for wind forecast skill scores.
 
 ## Why this problem
 
@@ -32,7 +32,7 @@ Evaluation runs on my local machine and logs to Weights & Biases.
 
 ## Summarized numbers
 
-| Parameters | |
+| Parameters | Value |
 |---|---|
 | Sites | 45, totalling 4,943 MW |
 | Coverage | ~90% of Ontario's ~5.5 GW of installed wind |
@@ -170,43 +170,15 @@ Error is reported in three ways because they answer different questions:
 - **Per-site-equal**: calculate each site's error as a percentage of its own capacity then average all the percentages. Which sites have the best and worst predictions?
 
 
-### Why not the Generator Output and Capability Report Forecast column as the baseline
+## Why not the Generator Output and Capability Report Forecast column as the baseline
 
+The Generator Output and Capability Report have a Forecast column but I am not using it as the baseline. The reason is lead-time mismatch.
 
+The Forecast numbers in the Report is short-lead forecast using live telemetry instead of a day-ahead forecast. It can be seen by the way of its near-perfect accuracy which shows ~1.6% MAE with no bias when measuring against the Output column in July 2026. A study conducted by [Miettinen et al.](https://www.osti.gov/servlets/purl/1571902) studying wind power error forecast distributions states that "The average site‐specific MAE is 10.7 % of the installed capacity." for day-ahead forecasting. For short-term forecasting, another study by [Würth et al.](https://www.mdpi.com/1996-1073/12/4/712) states that "the background mean absolute error (MAE) just under 4% of installed capacity".
 
----
+The Variable Generation Forecast Summary runs 48 hours ahead and have comparable lead-time. However, it publishes only zonal totals and no per-site breakdown.
 
-The Generator Output and Capability Report contains a Forecast column, but it is
-not a day-ahead product. Measured against the Output column over July 2026 it
-shows ~1.6% MAE of capacity with near-zero bias, error that scales with ramp size
-(1.5 MWh on flat hours versus 4.5 MWh on 20+ MW hour-over-hour changes), and
-occasional catastrophic misses at outage events. That is the profile of a
-very-short-lead forecast informed by live telemetry, not a 24-hour-ahead one.
-
-The archived monthly report also contains no forward-looking rows, so a
-day-ahead IESO forecast cannot be recovered from it retroactively, and daily
-snapshotting would not help — each snapshot only ever adds another completed day.
-
-Comparing a 24-hour-ahead model against it would be a lead-time mismatch in
-either direction, so no such comparison is made. The GOCR remains ground truth
-via its Output column; only the Forecast column is unsuitable as a comparator.
-
-IESO's Variable Generation Forecast Summary (48 hours ahead) would be
-lead-time-comparable, but publishes provincial and zonal totals rather than
-per-generator values — usable against the fleet aggregate only. Noted as future
-work.
-
----
-
-The GOCR has a Forecast column and it would be very convenient to benchmark against it. It isn't a day-ahead forecast, though. Checked against the Output column over July 2026 it sits at about 1.6% MAE of capacity with essentially no bias, and its error scales with ramp size — around 1.5 MWh on flat hours against 4.5 MWh when output moves 20+ MW hour over hour. It also misses badly at outages. That's a short-lead forecast fed by live telemetry, not something issued 24 hours out.
-
-The archived monthly file has no forward-looking rows either, so there's no way to recover a day-ahead IESO forecast retroactively, and snapshotting the file daily wouldn't help — each snapshot just adds another finished day.
-
-Comparing against it would be a lead-time mismatch whichever way the result went, so I don't. The Output column is still ground truth and that's what I score against.
-
-The Variable Generation Forecast Summary runs 48 hours ahead and would be lead-time comparable, but it publishes zonal totals only. That would benchmark the fleet aggregate, not individual sites. It's on the roadmap.
-
-### Offline results — full-year 2025 held-out test
+## Offline results for full-year 2025 test
 
 | Metric | Value |
 |---|---|
@@ -214,12 +186,22 @@ The Variable Generation Forecast Summary runs 48 hours ahead and would be lead-t
 | nMAE, capacity-weighted | 11.31% |
 | MAE | 12.43 MWh |
 | Bias | +0.13 MWh |
+| winter nMAE | 13.70% |
+| spring nMAE | 13.81% |
+| summer nMAE | 9.16% |
+| fall nMAE | 10.70% |
 
-Seasonal breakdown shows substantial variation: winter 13.70%, spring 13.81%,
-summer 9.16%, fall 10.70%. Any single-season result should be read against the
-corresponding season, not the annual figure.
+The nMAE values are in line with the values from the quoted study above. Season matters a lot with nMAE going up on more windy seasons.
 
-### Live results — July 2026
+### Live results from mid-July to early August 2026
+
+Nineteen batches have been scored. Fifteen have near-complete windows — at least 1,000 of the 1,080 expected site-hours — and everything below comes from those. Capacity-weighted and fleet-aggregate metrics were added on 18 July, so those cover thirteen.
+
+Per-site-equal nMAE ran 6.6% to 18.0%, median 8.5%. Capacity-weighted ran 6.2% to 19.5%, median 8.0%. Fleet-aggregate ran 3.2% to 7.5%, median 4.9%.
+
+Skill against persistence ranged from +0.02 to +0.78, median +0.54. Every batch beat the reference, but the spread is almost entirely a story about how hard each day was. Persistence itself ranged from 6.8% to 41.4% nMAE. On 26 July persistence managed 6.8% and the model 6.6%, for a skill score of +0.02. On 19 July persistence was at 37.7% and the model at 8.3%, for +0.78. Skill measures a gap, and on calm steady days there isn't much of one to measure.
+
+----
 
 Scored batches, capacity-weighted unless noted:
 
@@ -258,64 +240,35 @@ Caveat: four days, one season, one weather regime.
 
 ## Known limitations
 
-### Conditional bias: regression to the mean
+## Misleading bias value
 
-Aggregate bias is near zero (+0.13 MWh on the 2025 test set), but that figure
-masks large opposing biases. Binning by *actual* capacity factor:
+The aggregate bias is near zero (+0.13 MWh on the 2025 test set) which looks good at first glance. However, if we break down the numbers by capacity factor:
 
 | Actual CF | MAE (MWh) | Bias (MWh) | % of hours |
 |---|---|---|---|
-| 0–5% | 9.94 | **+9.83** | 24.2% |
-| 5–20% | 9.49 | +6.16 | 23.0% |
-| 20–50% | 13.14 | +0.19 | 24.4% |
+| 0–5% | 9.94 | **+9.83** | 24.1% |
+| 5–20% | 9.49 | +6.16 | 22.9% |
+| 20–50% | 13.14 | +0.19 | 24.3% |
 | 50–80% | 16.24 | **−10.16** | 15.0% |
 | 80–100% | 16.41 | **−16.05** | 13.4% |
 
-The model over-predicts when the fleet is generating weakly and under-predicts
-when it is generating hard — classic regression toward the mean. The headline
-bias is near zero only because the bins cancel: count-weighting these values
-reproduces the reported aggregate to rounding.
+When the wind is weak, it predicts over actual output. The opposite happens with the model predicts under actual output when the wind is strong. The bias is near zero as those cancel each other out. 
 
-The distribution matters. Ontario wind sits below 20% capacity factor 47% of the
-time and above 50% only 28% of the time, so the model spends most of its
-operating hours in its over-prediction regime.
+Ontario wind generators are below 20% CF around 47% of the time, and above 50% around 28% of the time. Most of the bias occurs by over-predicting the output meaning less actual power is generated than the forecast.
 
-**This pattern was confirmed live.** On 2026-07-21 — an atypical high-wind day
-where 51% of site-hours exceeded 50% CF, against an annual rate of 28% — the same
-monotone structure reproduced on data eleven months after the test set: strongly
-positive bias in the low-CF bins, negative in the high. Live magnitudes ran
-roughly 2–3× the offline ones and the zero-crossing shifted upward, so the
-structure generalized while the calibration did not.
+Several possible causes are: 
+- the model is underfit
+- curtailment
+- the weather forecast is inaccurate for wind speed especially for 24 hours ahead.
 
-Correcting this conditional bias is the clearest available improvement and is not
-yet implemented.
+## Other limitations
 
-### Other limitations
-
-- **Outages and curtailment are invisible to the model.** Inputs are weather
-  only, so a site that is offline for non-weather reasons produces large errors
-  the model cannot anticipate. One site on 2026-07-21 recorded 52% nMAE against a
-  fleet figure of 20%. The GOCR publishes an Available Capacity column that would
-  support filtering these cases; this is not yet implemented.
-- **Anomaly handling is rule-based.** One site is excluded for months where mean
-  output is exactly zero while available capacity is positive. A statistical
-  anomaly detector is out of scope for v1.
-- **Evaluation is manual.** The scheduled pipeline fetches weather and predicts;
-  it does not ingest IESO actuals, so scoring a batch requires running the
-  ingest flow by hand first. See [Evaluating a batch](#evaluating-a-batch).
-- **Training and backfill scripts predate the package layout.** They use the
-  older import style and local filesystem paths, and run on a development machine
-  rather than in the cloud.
-- **Unit convention.** Both the training and inference fetchers use Open-Meteo's
-  default km/h wind speed. Training and inference are therefore consistent and
-  the model is unaffected, but the codebase does not state its units explicitly.
-  Standardizing on m/s requires a retrain and is deferred to the next model
-  upgrade, where a backfill happens anyway.
-- **Provenance column is not yet discriminating.** Every prediction row carries a
-  `code_sha` column, which falls back to the literal `local` when the environment
-  variable is unset. Because CI is not yet wired up, all rows currently read
-  `local` — the mechanism is in place and the fallback behaves correctly, but it
-  will only distinguish scheduled from manual runs once CI injects the SHA.
+- **Curtailment are invisible to the model**: When IESO algorithm instructs a wind farm to produce less electricity for market or grid stability reason, the output drops not because of the weather. The curtailment hours are not indicated in the Generator Output and Capability Report. Therefore, the model will produce error during curtailment as dispatch decisions are invisible to it. This may also be part of the reson for under-prediction during high CF times when the wind is strong. Most curtailment happens on windy nights and demand is low which is exactly when the model under-predicts.
+- **Outages are invisible to the model**: Maintenance decisions are not published beforehand therefore this is another possible source of error. A particular site may have some of its turbines offline for a time and it will produce less output than expected. 
+- **Training weather is better than production weather**: Open-Meteo's historical forecast archive stores short forecasts made close to the time of the weather models run. This means the wind speed data used for training is close to when it actually happened. In production, I use weather forecast up to 24 hours ahead where the wind speed used as input is considerably less accurate. 
+- **Anomaly handling is hand-written**: I excluded on purpose a site (BOWLAKE) where the mean output is exactly zero while there is available capacity. An anomaly detector is out of scope for this initial version.   
+- **Evaluation is manual**: Currently, the scheduled job only downloads the weather and predicts the output. It never automatically downloads actual IESO data. Evaluating a prediction batch is done manually by running the ingest flow then the evaluation flow. Steps below for [evaluating a batch](#evaluating-a-batch).
+- **Training scripts use local paths**: The script for training a new model is outdated since it still  use local filesystem paths. It runs on local machine instead of in the cloud. 
 
 ---
 
@@ -449,7 +402,7 @@ python -m wind_forecast.evaluate.evaluate_and_log --run-timestamp 20260718_0202 
 
 ## Data sources
 
-- **IESO Generator Output and Capability Report** — hourly per-generator output
+- **IESO Output and Capability Report** — hourly per-generator output
   and available capacity for market-participant generators of 20 MW or greater.
   Published with roughly a one-day lag. Used as ground truth. Its Forecast column
   is not used as a baseline; see [Evaluation](#why-the-ieso-gocr-forecast-column-is-not-a-baseline).
