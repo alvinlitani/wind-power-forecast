@@ -263,100 +263,39 @@ Several possible causes are:
 
 ## Other limitations
 
-- **Curtailment are invisible to the model**: When IESO algorithm instructs a wind farm to produce less electricity for market or grid stability reason, the output drops not because of the weather. The curtailment hours are not indicated in the Generator Output and Capability Report. Therefore, the model will produce error during curtailment as dispatch decisions are invisible to it. This may also be part of the reson for under-prediction during high CF times when the wind is strong. Most curtailment happens on windy nights and demand is low which is exactly when the model under-predicts.
-- **Outages are invisible to the model**: Maintenance decisions are not published beforehand therefore this is another possible source of error. A particular site may have some of its turbines offline for a time and it will produce less output than expected. 
-- **Training weather is better than production weather**: Open-Meteo's historical forecast archive stores short forecasts made close to the time of the weather models run. This means the wind speed data used for training is close to when it actually happened. In production, I use weather forecast up to 24 hours ahead where the wind speed used as input is considerably less accurate. 
-- **Anomaly handling is hand-written**: I excluded on purpose a site (BOWLAKE) where the mean output is exactly zero while there is available capacity. An anomaly detector is out of scope for this initial version.   
-- **Evaluation is manual**: Currently, the scheduled job only downloads the weather and predicts the output. It never automatically downloads actual IESO data. Evaluating a prediction batch is done manually by running the ingest flow then the evaluation flow. Steps below for [evaluating a batch](#evaluating-a-batch).
-- **Training scripts use local paths**: The script for training a new model is outdated since it still  use local filesystem paths. It runs on local machine instead of in the cloud. 
+**Curtailment are invisible to the model**: When IESO algorithm instructs a wind farm to produce less electricity for market or grid stability reason, the output drops not because of the weather. The curtailment hours are not indicated in the Generator Output and Capability Report. Therefore, the model will produce error during curtailment as dispatch decisions are invisible to it. This may also be part of the reson for under-prediction during high CF times when the wind is strong. Most curtailment happens on windy nights and demand is low which is exactly when the model under-predicts.
+
+**Outages are invisible to the model**: Maintenance decisions are not published beforehand therefore this is another possible source of error. A particular site may have some of its turbines offline for a time and it will produce less output than expected. 
+
+**Training weather is better than production weather**: Open-Meteo's historical forecast archive stores short forecasts made close to the time of the weather models run. This means the wind speed data used for training is close to when it actually happened. In production, I use weather forecast up to 24 hours ahead where the wind speed used as input is considerably less accurate. 
+
+**Anomaly handling is hand-written**: I excluded on purpose a site (BOWLAKE) where the mean output is exactly zero while there is available capacity. An anomaly detector is out of scope for this initial version.   
+
+**Evaluation is manual**: Currently, the scheduled job only downloads the weather and predicts the output. It never automatically downloads actual IESO data. Evaluating a prediction batch is done manually by running the ingest flow then the evaluation flow. Steps below for [evaluating a batch](#evaluating-a-batch).
+
+**Training scripts use local paths**: The script for training a new model is outdated since it still  use local filesystem paths. It runs on local machine instead of in the cloud. 
+
+**CI feature not available yet**: The prediction CSV have a column 'code_sha' which stores the particular git commit of the prediction code running. It is not working yet and currently only prints 'local'.
 
 ---
 
 ## Data quality gates
 
-I want to ensure that the runtime fails completely rather than having corrupted data. There are several failure gates:
+I want to ensure that the runtime fails completely rather than having corrupted data output. There are several checks that raise exceptions so it is recorded as failure instead of silently stopping. Those are:
 - Fetch stage: all generator sites must have weather forecasts for the next 24 hours. Recovery is done by retrying fetch for particular sites but missing sites are not tolerated.
 - Predict stage: all generator sites must have predictions for the next 24 hours.
 - Serving stage: all the sites must be in the pre-computed CSV file. This is to ensure failures happening in mid-write process is caught.
-
-
-The pipeline fails closed rather than emitting a plausible-looking but incomplete
-batch. Each gate raises rather than exiting, so failures are visible to the
-orchestrator and eligible for retry.
-
-| Gate | Location | Fires when |
-|---|---|---|
-| Roster completeness | `fetch_forecast_all.py` | Expected sites missing from the weather fetch |
-| Roster completeness | `predict_pc.py` | Any of the 45 sites absent from the prediction batch |
-| NaN features | `predict_pc.py` | Any NaN feature-hour (`MAX_NAN_FEATURE_HOURS=0`) |
-| Short window | `predict_pc.py` | A site's forecast window is shorter than expected |
-
-All three `predict_pc` gates are evaluated **after** the per-site loop completes.
-An earlier version evaluated them at the top of the loop against dictionaries
-populated at the bottom, so a bad site processed last — or a single-site run —
-was recorded but never checked, and a green run could write a bad CSV. The
-regression tests for that case are in `tests/test_predict_pc_gates.py`, which
-covers seven fire paths including a clean-batch control, NaN in the middle, last,
-and only site, a short window in the last site, a missing site, and model/mapping
-drift.
-
-Gates that have only been verified to pass on clean data have not been verified
-at all. Each of these has a negative test that injects the failure it is meant to
-catch.
-
----
-
-## Repository structure
-
-```
-wind-power-forecast/
-├── src/wind_forecast/
-│   ├── config.py          # DATA_ROOT / MODELS_ROOT resolution
-│   ├── storage.py         # I/O router: local disk vs gs://
-│   ├── model.py           # LSTM network definition (offline path)
-│   ├── ingest/            # IESO download + weather fetch
-│   ├── features/          # Feature engineering (training)
-│   ├── predict/           # predict_pc.py (live), predict.py (LSTM, offline)
-│   ├── evaluate/          # evaluate_daily.py, evaluate_and_log.py
-│   ├── train/             # Training, fine-tuning, hyperparameter search
-│   └── pipeline/
-│       └── daily.py       # `wf-daily`: fetch → predict, one process
-├── serving/               # FastAPI service deployed to Cloud Run
-├── orchestration/
-│   └── trigger.py         # Prefect flow: triggers the Cloud Run Job
-├── flows/                 # Local-development orchestration (see note)
-├── tests/
-├── docs/
-└── pyproject.toml         # extras: [dl] (torch), [pipeline] (prefect, wandb)
-```
-
-`storage.py` is the load-bearing piece. Every read and write goes through it, and
-it routes on path prefix: `data/...` to local disk, `gs://bucket/...` to Cloud
-Storage. The same code runs unchanged on a laptop with `DATA_ROOT=data` and in
-the Cloud Run Job with `DATA_ROOT=gs://wind-forecast-ontario-data`.
-
-**A note on `flows/`.** These are Prefect flows for local development and
-iteration — they run end-to-end and are useful for exercising the pipeline
-interactively, but they are not what runs in production. The deployed schedule
-triggers the Cloud Run Job via `orchestration/trigger.py`; `flows/` is not
-deployed anywhere. Note that a local flow run inherits whatever `DATA_ROOT`
-points at, so running one with `DATA_ROOT=gs://...` will write a real
-off-schedule batch into the production bucket.
 
 ---
 
 ## Local development
 
-Requires Python 3.10+. CPU is sufficient; the live XGBoost path has no GPU
-dependency and the Job image does not install torch.
+Requires Python 3.10+. CPU is fine. The live XGBoost model has no GPU dependency and the Job image does not install torch.
 
 ```bash
 git clone https://github.com/alvinlitani/wind-power-forecast.git
 cd wind-power-forecast
 pip install -e ".[dl,pipeline]"
-
-# Storage roots default to ./data and ./models
-cp .env.example .env
 ```
 
 Run the production pipeline locally:
@@ -365,14 +304,14 @@ Run the production pipeline locally:
 python -m wind_forecast.pipeline.daily
 ```
 
-Or individual stages:
+Individual stages:
 
 ```bash
 python -m wind_forecast.ingest.fetch_forecast_all
 python -m wind_forecast.predict.predict_pc --run-timestamp 20260721_0200
 ```
 
-Or the development flows:
+The flows in flows/ are for local testing only. In production, the Prefect schedule triggers the Cloud Run Job through orchestration/trigger.py and flows/ is not used anywhere. Development flows:
 
 ```bash
 python -m flows.ingest_flow
@@ -382,8 +321,7 @@ python -m flows.evaluate_flow
 
 ### Evaluating a batch
 
-Scoring is currently a three-step manual workflow, because the scheduled
-pipeline does not ingest IESO actuals:
+Scoring is currently a three-step manual workflow because the scheduled pipeline does not ingest IESO actuals:
 
 ```bash
 # 1. Push IESO actuals to the bucket
@@ -391,10 +329,10 @@ DATA_ROOT=gs://wind-forecast-ontario-data python -m flows.ingest_flow
 
 # 2. Choose a batch at least two days old (GOCR lag + midnight-straddling window)
 
-# 3. Score it, with W&B logging
+# 3. Score it with W&B logging
 python -m wind_forecast.evaluate.evaluate_and_log --run-timestamp 20260718_0202
 
-# ...or without
+# Without logging
 python -m wind_forecast.evaluate.evaluate_and_log --run-timestamp 20260718_0202 --no-wandb
 ```
 
@@ -402,17 +340,15 @@ python -m wind_forecast.evaluate.evaluate_and_log --run-timestamp 20260718_0202 
 
 ## Data sources
 
-- **IESO Output and Capability Report** — hourly per-generator output
-  and available capacity for market-participant generators of 20 MW or greater.
-  Published with roughly a one-day lag. Used as ground truth. Its Forecast column
-  is not used as a baseline; see [Evaluation](#why-the-ieso-gocr-forecast-column-is-not-a-baseline).
-- **Open-Meteo Historical Forecast API** — past *forecast* weather, used for
-  training. Mirrors production conditions rather than reanalysis.
-- **Open-Meteo Forecast API** — live forecasts at inference time. Best-match
-  model selection per coordinate, deterministic across training and inference for
-  any given site.
-- **Wind Turbine Database (FGP)** — per-site nameplate, hub height, rotor
-  diameter.
+**[IESO Output and Capability Report](https://reports-public.ieso.ca/public/GenOutputCapabilityMonth/)**: The report contains hourly output, available capacity, and forecast for IESO plants with capacity of 20 MW or greater. This project uses the report as ground truth. The Forecast column is not used as baseline for reason stated above.
+
+**[Canadian Wind Turbine Database](https://open.canada.ca/data/en/dataset/79fdad93-9025-49ad-ba16-c26d718cc070)**: The database has detailed information about the wind turbine locations such as: number of turbines in a location, year of commision, manufacturer, hub height, rotor diameter, etc. For this project, the latitude/longitude of each turbine in a site is used to calculate the centroid of that site. The centroid is then used to represent the location when requesting weather forecasts. 
+
+**[IESO Active Contracted Generation List](https://www.ieso.ca/-/media/Files/IESO/Document-Library/power-data/supply/IESO-Active-Contracted-Generation-List.xlsx)**:  The list contains generator sites that are currently contracted with IESO. It has detailed information such as: operation starting date, contract dates, IESO zones, etc. The list is used to confirm actual locations of the wind generator sites as it has municipality locations of the sites.
+
+**Open-Meteo Historical Forecast API**: The API serves past weather forecasts and not past actual weather conditions. The data is used for training the model.
+
+**Open-Meteo Forecast API**:  The API serves live forecasts which is used for inference. 
 
 ---
 
