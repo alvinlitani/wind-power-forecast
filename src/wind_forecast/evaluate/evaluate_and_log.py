@@ -1,10 +1,6 @@
 """
 Evaluate one prediction batch against IESO actuals and log to W&B.
 
-Runs the model evaluation and the IESO baseline over the SAME window, then
-logs both plus the delta as a single W&B run. The delta is the portfolio
-number: negative means the model beat IESO's own forecast.
-
 Reads/writes wherever DATA_ROOT points (local or gs://), so this evaluates
 cloud batches directly once IESO actuals have been ingested to the bucket.
 
@@ -52,6 +48,12 @@ def log_to_wandb(m: dict, project: str = WANDB_PROJECT):
         f"{model_name}/mae_mwh": m["mae_mwh"],
         f"{model_name}/rmse_mwh": m["rmse_mwh"],
         f"{model_name}/bias_cf": m["bias_cf"],
+        f"{model_name}/nmae_capwtd_pct": m["nmae_capwtd_pct"],
+        f"{model_name}/nrmse_capwtd_pct": m["nrmse_capwtd_pct"],
+        f"{model_name}/nmae_fleet_pct": m["nmae_fleet_pct"],
+        f"{model_name}/nrmse_fleet_pct": m["nrmse_fleet_pct"],
+        f"{model_name}/bias_fleet_cf": m["bias_fleet_cf"],
+        "n_hours_fleet": m["n_hours_fleet"],
         "n_sites": m["n_sites"],
         "n_rows": m["n_rows"],
     }

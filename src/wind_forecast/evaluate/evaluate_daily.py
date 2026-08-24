@@ -310,6 +310,32 @@ def run_evaluation(
     agg_rmse_cf = float(np.sqrt((merged["error_cf"] ** 2).mean()))
     agg_rmse_mwh = float(np.sqrt((merged["error_mwh"] ** 2).mean()))
 
+    # --- Capacity-weighted aggregate (A) ---
+    # agg_mae_cf above weights every site-hour equally, so a 20 MW site counts
+    # as much as a 270 MW one — it answers "how does a typical site do?".
+    # Weighting by capacity answers "how much error per MW installed?", which
+    # is the portfolio-normalized nMAE standard in the literature.
+    _w = merged["capacity_mw"]
+    agg_mae_capwtd = float((_w * merged["abs_error_cf"]).sum() / _w.sum())
+    agg_rmse_capwtd = float(np.sqrt((_w * merged["error_cf"] ** 2).sum() / _w.sum()))
+
+    # --- Fleet aggregate (B) ---
+    # Sum generation across sites FIRST, then measure error, so over- and
+    # under-prediction at different sites cancel (spatial smoothing). This is
+    # the number a portfolio bidder bears; it is NOT comparable to per-site
+    # nMAE and will be materially lower. Normalized per hour by the capacity
+    # actually present that hour, so a missing site cannot deflate the metric.
+    hourly = merged.groupby("datetime").agg(
+        pred_mwh=("predicted_mwh", "sum"),
+        act_mwh=("output_mwh", "sum"),
+        cap_mw=("capacity_mw", "sum"),
+    )
+    hourly["error_cf"] = (hourly["pred_mwh"] - hourly["act_mwh"]) / hourly["cap_mw"]
+    agg_mae_fleet = float(hourly["error_cf"].abs().mean())
+    agg_rmse_fleet = float(np.sqrt((hourly["error_cf"] ** 2).mean()))
+    agg_bias_fleet = float(hourly["error_cf"].mean())
+    n_hours_fleet = int(len(hourly))
+
     # --- Skill vs persistence ---
     # skill = 1 - (model error / reference error). Both sides must be scored on
     # the SAME rows, so model error is recomputed on the subset where a
@@ -365,6 +391,14 @@ def run_evaluation(
     print(f"  Aggregate RMSE (CF): {agg_rmse_cf:.4f} ({agg_rmse_cf*100:.2f}%)")
     print(f"  Aggregate RMSE (MWh):{agg_rmse_mwh:.2f}")
     print(f"")
+    print(f"  --- weighting variants ---")
+    print(f"  nMAE per-site-equal: {agg_mae_cf*100:.2f}%   (each site-hour equal)")
+    print(f"  nMAE capacity-wtd:   {agg_mae_capwtd*100:.2f}%   (per MW installed)")
+    print(f"  nRMSE capacity-wtd:  {agg_rmse_capwtd*100:.2f}%")
+    print(f"  nMAE fleet-aggregate:{agg_mae_fleet*100:.2f}%   ({n_hours_fleet} hours, errors cancel)")
+    print(f"  nRMSE fleet-aggregate:{agg_rmse_fleet*100:.2f}%")
+    print(f"  Fleet bias (CF):     {agg_bias_fleet*100:+.2f}%")
+    print(f"")
     if n_rows_persist > 0:
         print(f"  --- vs persistence (same-hour D-1), {n_rows_persist} matched rows ---")
         print(f"  Persistence nMAE:    {persist_mae_cf*100:.2f}%")
@@ -413,6 +447,13 @@ def run_evaluation(
         "skill_score_mae": skill_mae,
         "skill_score_rmse": skill_rmse,
         "n_rows_persistence": n_rows_persist,
+        "nmae_capwtd_pct": agg_mae_capwtd * 100,
+        "nrmse_capwtd_pct": agg_rmse_capwtd * 100,
+        "nmae_fleet_pct": agg_mae_fleet * 100,
+        "nrmse_fleet_pct": agg_rmse_fleet * 100,
+        "bias_fleet_cf": agg_bias_fleet,
+        "n_hours_fleet": n_hours_fleet,
+        "detail_path": detail_path,
         "detail_path": detail_path,
         "summary_path": summary_path,
     }
