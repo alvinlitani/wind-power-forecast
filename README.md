@@ -20,8 +20,6 @@ The IESO already has made variable energy forecasting available to market partic
 
 This project aims to give granular per-site forecast for market participants beforehand for all IESO-covered wind generators.
 
----
-
 ## What is running now
 
 A single Cloud Run Job (`wind-forecast-job` running the `wf-daily` entry point) is triggered daily at 02:00 ET. It fetches weather for 45 sites, runs 45 XGBoost models, and writes predictions as CSV to Google Cloud Storage. Prefect Cloud have the schedule and triggers the job. The job is deliberately made lightweight and usually executes under a minute each run.
@@ -49,8 +47,6 @@ Evaluation runs on my local machine and logs to Weights & Biases.
 The roster is every site included in the [IESO Generator Output and Capability Report](https://reports-public.ieso.ca/public/GenOutputCapabilityMonth/) which covers market-participant generators of 20 MW or more. Embedded and sub-20 MW wind generators do not appear in the report which explains the ~560 MW gap against the provincial total. The [IESO Active Contracted Generation List](https://www.ieso.ca/-/media/Files/IESO/Document-Library/power-data/supply/IESO-Active-Contracted-Generation-List.xlsx) have 59 wind generator sites that are sub-20 MW with total capacity of around ~533 MW.
 
 I did not perform validation split. A separate validation set exists to choose from candidate models using different hyperparameter settings, feature sets, stopping points. This project is trained on one configuration that is chosen in advance from values in common use: n_estimators=100 and max_depth=6 are XGBoost's defaults, learning_rate=0.1 for conservative learning rate, random_state=42 for reproducibility. The 2025 test set was scored once.
-
----
 
 ## Architecture
 
@@ -112,8 +108,6 @@ There are two ways Prefect can run jobs on Google Cloud Run. A push pool creates
 
 Many weather models used by Open-Meteo have a [daily schedule](https://wethr.net/model-schedule) of running at 00, 06, 12, 18 UTC and they publish a few hours after that. This project aims to fetch the fresh weather forecast after the 00 run. 
 
----
-
 ## Modeling
 
 ## Capacity factor as the target
@@ -147,9 +141,7 @@ Each per-site model receives the 80m and 120m speeds directly and learns the map
 
 Some sites also have turbines at different heights which make it impossible to use only one height to represent it. Hub heights across the fleet run 78m to 132m with the data taken from [Canadian Wind Turbine Database](https://open.canada.ca/data/en/dataset/79fdad93-9025-49ad-ba16-c26d718cc070).
 
----
-
-## Evaluation
+# Evaluation
 
 ## Metrics
 
@@ -177,8 +169,6 @@ The Generator Output and Capability Report have a Forecast column but I am not u
 The Forecast numbers in the Report is short-lead forecast using live telemetry instead of a day-ahead forecast. It can be seen by the way of its near-perfect accuracy which shows ~1.6% MAE with no bias when measuring against the Output column in July 2026. A study conducted by [Miettinen et al.](https://doi.org/10.1002/we.2410) studying wind power error forecast distributions states that "The average site‐specific MAE is 10.7 % of the installed capacity." for day-ahead forecasting. For short-term forecasting, another study by [Würth et al.](https://www.mdpi.com/1996-1073/12/4/712) states that "the background mean absolute error (MAE) just under 4% of installed capacity".
 
 The Variable Generation Forecast Summary runs 48 hours ahead and have comparable lead-time. However, it publishes only zonal totals and no per-site breakdown.
-
----
 
 ## Offline results for full-year 2025 test
 
@@ -239,9 +229,7 @@ All live days are July and August during summer which is Ontario's low-wind/low-
 
 Published day-ahead nMAE for similar gradient-boosted models is around 10–12% (Miettinen et al. study). The 8.71% value is around the same ballpark figure. 
 
----
-
-## Known limitations
+# Known limitations
 
 ## Misleading bias value
 
@@ -280,16 +268,12 @@ Several possible causes are:
 
 **CI feature not available yet**: The prediction CSV have a column 'code_sha' which stores the particular git commit of the prediction code running. It is not working yet and currently only prints 'local'.
 
----
-
 ## Data quality gates
 
 I want to ensure that the runtime fails completely rather than having corrupted data output. There are several checks that raise exceptions so it is recorded as failure instead of silently stopping. Those are:
 - Fetch stage: all generator sites must have weather forecasts for the next 24 hours. Recovery is done by retrying fetch for particular sites but missing sites are not tolerated.
 - Predict stage: all generator sites must have predictions for the next 24 hours.
 - Serving stage: all the sites must be in the pre-computed CSV file. This is to ensure failures happening in mid-write process is caught.
-
----
 
 ## Local development
 
@@ -322,7 +306,7 @@ python -m flows.predict_flow
 python -m flows.evaluate_flow
 ```
 
-### Evaluating a batch
+## Evaluating a batch
 
 Scoring is currently a three-step manual workflow because the scheduled pipeline does not ingest IESO actuals:
 
@@ -339,8 +323,6 @@ python -m wind_forecast.evaluate.evaluate_and_log --run-timestamp 20260718_0202
 python -m wind_forecast.evaluate.evaluate_and_log --run-timestamp 20260718_0202 --no-wandb
 ```
 
----
-
 ## Data sources
 
 **[IESO Output and Capability Report](https://reports-public.ieso.ca/public/GenOutputCapabilityMonth/)**: The report contains hourly output, available capacity, and forecast for IESO plants with capacity of 20 MW or greater. This project uses the report as ground truth. The Forecast column is not used as baseline for reason stated above.
@@ -353,8 +335,6 @@ python -m wind_forecast.evaluate.evaluate_and_log --run-timestamp 20260718_0202 
 
 **[Open-Meteo Forecast API](https://open-meteo.com/en/docs)**:  The API serves live forecasts which is used for inference. 
 
----
-
 ## Shipped
 
 - Local pipeline: ingest, features, train, predict, evaluate
@@ -364,8 +344,6 @@ python -m wind_forecast.evaluate.evaluate_and_log --run-timestamp 20260718_0202 
 - FastAPI on Cloud Run serving predictions from GCS
 - Fail-closed data quality gates 
 - W&B evaluation logging with persistence reference and skill score
-
----
 
 ## MIT License
 
