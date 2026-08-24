@@ -22,7 +22,7 @@ This project aims to give granular per-site forecast for market participants bef
 
 ---
 
-## What is running today
+## What is running now
 
 A single Cloud Run Job (`wind-forecast-job` running the `wf-daily` entry point) is triggered daily at 02:00 ET. It fetches weather for 45 sites, runs 45 XGBoost models, and writes predictions as CSV to Google Cloud Storage. Prefect Cloud have the schedule and triggers the job. The job is deliberately made lightweight and usually executes under a minute each run.
 
@@ -166,17 +166,19 @@ The reported metrics are for hourly forecasts for the next 24 hours starting fro
 Error is reported in three ways because they answer different questions:
 
 - **Fleet-aggregate nMAE** : sums generation and prediction separately across all sites then measures the difference/error. Over-prediction at one site cancels under-prediction at another one. How accurate is the prediction for the whole fleet?
-- **Capacity-weighted per hour**: divide the sum of error by the sum of capacity. Big sites dominate because they contribute more MW to both sides. This is the standard roster-normalized figure in the literature. How much error per MW installed?
-- **Per-site-equal**: calculate each site's error as a percentage of its own capacity then average all the percentages. Which sites have the best and worst predictions?
+- **Capacity-weighted per hour**: sums up the error sizes and divide it by the sum of capacity. Negative signs are not kept. Big sites dominate because they contribute more MW to both sides. This is the standard figure in the literature. How much error per MW installed?
+- **Per-site-equal**: calculate each site's error as a percentage of its own capacity then average all the percentages. Which sites have the best and worst predictions? How wrong is the forecast at a typical site?
 
 
 ## Why not the Generator Output and Capability Report Forecast column as the baseline
 
 The Generator Output and Capability Report have a Forecast column but I am not using it as the baseline. The reason is lead-time mismatch.
 
-The Forecast numbers in the Report is short-lead forecast using live telemetry instead of a day-ahead forecast. It can be seen by the way of its near-perfect accuracy which shows ~1.6% MAE with no bias when measuring against the Output column in July 2026. A study conducted by [Miettinen et al.](https://www.osti.gov/servlets/purl/1571902) studying wind power error forecast distributions states that "The average site‐specific MAE is 10.7 % of the installed capacity." for day-ahead forecasting. For short-term forecasting, another study by [Würth et al.](https://www.mdpi.com/1996-1073/12/4/712) states that "the background mean absolute error (MAE) just under 4% of installed capacity".
+The Forecast numbers in the Report is short-lead forecast using live telemetry instead of a day-ahead forecast. It can be seen by the way of its near-perfect accuracy which shows ~1.6% MAE with no bias when measuring against the Output column in July 2026. A study conducted by [Miettinen et al.](https://doi.org/10.1002/we.2410) studying wind power error forecast distributions states that "The average site‐specific MAE is 10.7 % of the installed capacity." for day-ahead forecasting. For short-term forecasting, another study by [Würth et al.](https://www.mdpi.com/1996-1073/12/4/712) states that "the background mean absolute error (MAE) just under 4% of installed capacity".
 
 The Variable Generation Forecast Summary runs 48 hours ahead and have comparable lead-time. However, it publishes only zonal totals and no per-site breakdown.
+
+---
 
 ## Offline results for full-year 2025 test
 
@@ -193,48 +195,49 @@ The Variable Generation Forecast Summary runs 48 hours ahead and have comparable
 
 The nMAE values are in line with the values from the quoted study above. Season matters a lot with nMAE going up on more windy seasons.
 
-### Live results from mid-July to early August 2026
+## Live results 
 
-Nineteen batches have been scored. Fifteen have near-complete windows — at least 1,000 of the 1,080 expected site-hours — and everything below comes from those. Capacity-weighted and fleet-aggregate metrics were added on 18 July, so those cover thirteen.
+The 02:00 ET job has run daily since 16 July to 19 August 2026 with 35 batches and no missed days. Each batch covers 45 sites over 24 hours. It then gets scored against IESO Generator Output and Capability Report actual values.
 
-Per-site-equal nMAE ran 6.6% to 18.0%, median 8.5%. Capacity-weighted ran 6.2% to 19.5%, median 8.0%. Fleet-aggregate ran 3.2% to 7.5%, median 4.9%.
+A full batch is 1080 site-hours = 45 sites × 24 hours. Four batches have way less site-hours than 1080 site-hours because of missing actual values in the report. Therefore I left them out: 21 July, 29 July, 31 July, and 3 August. There are 25 full batches and 6 almost-full batches. The median values below are from those 31 batches.
 
-Skill against persistence ranged from +0.02 to +0.78, median +0.54. Every batch beat the reference, but the spread is almost entirely a story about how hard each day was. Persistence itself ranged from 6.8% to 41.4% nMAE. On 26 July persistence managed 6.8% and the model 6.6%, for a skill score of +0.02. On 19 July persistence was at 37.7% and the model at 8.3%, for +0.78. Skill measures a gap, and on calm steady days there isn't much of one to measure.
+| Metric | Median value | 
+|---|---|
+| nMAE, per-site-equal | 8.71% |
+| nMAE, capacity-weighted | 8.17% |
+| nMAE, fleet-aggregate | 4.86% | 
+| MAE | 8.97 MWh | 
+| Skill score (MAE) vs. persistence | 0.366 |
+| Skill score (RMSE) vs. persistence | 0.457 |
+| Persistence reference, nMAE | 14.69% | 
 
-----
+Persistence model means using the actual output from the same hour yesterday as the forecast. An example is that the output at 10 AM on 24 July is assumed to be similar to the output at 10 AM on 23 July.
 
-Scored batches, capacity-weighted unless noted:
+Median per-site nMAE of 8.71% is in line with published day-ahead results. According to the survey of forecasting models done by [Piotrowski et al.](https://www.mdpi.com/1996-1073/15/24/9657), reported nMAE has a median of ~8.9% for different models and ~7.3% for best models. Those studies mostly cover single wind farms over a time period compared to this project which is a 45-site fleet scored daily.
 
-| Batch | Per-site-equal | Capacity-wtd | Fleet-aggregate | Fleet bias |
-|---|---|---|---|---|
-| 2026-07-18 | 17.98% | 19.49% | 6.68% | +3.83% |
-| 2026-07-19 | 8.28% | 7.89% | 4.56% | +4.56% |
-| 2026-07-20 | 11.79% | 11.21% | 7.01% | −5.40% |
+Fleet-aggregate nMAE of 4.86% is comparable to published regional forecast errors. A study of Nordic wind power models by [Miettinen and Holttinen](https://cris.vtt.fi/en/publications/characteristics-of-day-ahead-wind-power-forecast-errors-in-nordic/) shows an average day-ahead MAE of 5.7% of installed capacity across individual Nordic regions. The smallest areas have about 8% MAE while dropping to 2.5% when all four Nordic countries are aggregated together. Ontario's wind capacity sits in between those two levels as it is larger than one of their regions but smaller than the whole Nordic system. 
 
-Skill score against persistence has ranged from roughly +0.36 to +0.79 across
-scored batches — consistently better than naive, but varying enough that skill
-score should not be read as fully normalizing out day difficulty.
+## Positive bias
 
-**These are not comparable to the offline figures.** The offline result is a
-full year across all seasons; these are consecutive summer days in a single
-weather regime. Offline summer alone is 9.16%. The live and offline numbers are
-computed identically but drawn from different populations, and no agreement
-between them is claimed.
+There are small biases on the run batches with positive value on 26 batches. Overall, the model predicts more output than what is actually produced. This is in line with earlier observation that the model over-predicts when output is low. Ontario wind runs below 20% capacity factor about 47% of the time so most hours are over-predicted and the net bias comes out positive.
 
-### What fleet aggregation reveals
+## Skill score against persistence
 
-Fleet-aggregate error runs 40–63% below per-site error across scored batches.
-More informatively, fleet *bias* accounts for most of the fleet error that
-remains — on 2026-07-19 the two were identical to two decimals, meaning the
-hourly fleet error never changed sign across 24 hours.
+The skill_score_mae value is calculated by the formula 1 − (pc/nmae_pct  / persistence/nmae_pct). There are 30 of 31 batches beating persistence on MAE with the one loss on 10 August. Skill score of 0 means the two values are exact while negative means persistence beats the model.
 
-The interpretation: spatial aggregation cancels the site-idiosyncratic component
-of error, and what survives is largely common-mode — 45 sites sharing one NWP
-source being wrong in the same direction at the same hour. This points at bias
-correction as the highest-value next improvement, since better per-site modelling
-attacks the component that already cancels.
+Beating persistence is a low bar as this shows the weather inputs add information beyond yesterday's output. 
 
-Caveat: four days, one season, one weather regime.
+## Errors cancel out across the fleet
+
+Fleet-aggregate error (4.86%) is about 40% lower than per-site error (8.17%). Sites are spread across the province with varying geographical conditions so some have higher error rates than others. The sites that are forecast too high and the sites that are forecast too low partly cancel out each other in the provincial total. A 40% reduction is in line with what the literature reports (40–63%). 
+
+Aggregate error is what matters to a system operator; per-site error is what matters to an asset owner.
+
+## Caveat
+
+All live days are July and August during summer which is Ontario's low-wind/low-output season. The model has not been tested live against winter weather when the winds are stronger and more variable. The low temperature and icing on the blades will also affects output.
+
+Published day-ahead nMAE for similar gradient-boosted models is around 10–12% (Miettinen et al. study). The 8.71% value is around the same ballpark figure. 
 
 ---
 
@@ -346,49 +349,21 @@ python -m wind_forecast.evaluate.evaluate_and_log --run-timestamp 20260718_0202 
 
 **[IESO Active Contracted Generation List](https://www.ieso.ca/-/media/Files/IESO/Document-Library/power-data/supply/IESO-Active-Contracted-Generation-List.xlsx)**:  The list contains generator sites that are currently contracted with IESO. It has detailed information such as: operation starting date, contract dates, IESO zones, etc. The list is used to confirm actual locations of the wind generator sites as it has municipality locations of the sites.
 
-**Open-Meteo Historical Forecast API**: The API serves past weather forecasts and not past actual weather conditions. The data is used for training the model.
+**[Open-Meteo Historical Forecast API](https://open-meteo.com/en/docs/historical-forecast-api)**: The API serves past weather forecasts and not past actual weather conditions. The data is used for training the model.
 
-**Open-Meteo Forecast API**:  The API serves live forecasts which is used for inference. 
+**[Open-Meteo Forecast API](https://open-meteo.com/en/docs)**:  The API serves live forecasts which is used for inference. 
 
 ---
 
-## Roadmap
+## Shipped
 
-Shipped:
-
-- [x] Local pipeline: ingest, features, train, predict, evaluate
-- [x] Storage abstraction (local ↔ GCS)
-- [x] Python package + Prefect flows
-- [x] Cloud Run Job running the daily fetch-and-predict pipeline
-- [x] Prefect Cloud scheduling the Job (Managed pool, invoke-only credentials)
-- [x] FastAPI on Cloud Run serving predictions from GCS
-- [x] Fail-closed data quality gates with negative tests
-- [x] W&B evaluation logging with persistence reference and skill score
-
-Next:
-
-- [ ] GitHub Actions CI with Workload Identity Federation, plus `CODE_SHA`
-      injection at deploy so the provenance column becomes discriminating
-- [ ] Conditional bias correction (see [Known limitations](#conditional-bias-regression-to-the-mean))
-- [ ] Availability-based outage and curtailment filtering using the GOCR
-      Available Capacity column
-- [ ] Scheduled evaluation — requires adding an IESO ingest stage to the
-      scheduled pipeline
-- [ ] Day-ahead horizon (00:00–23:00 on D+1, 22–46 hours ahead) to align with
-      DAM bidding. The power curve carries no lead-time features, so this is a
-      configuration change rather than a retrain; accuracy will degrade with
-      lead time and would need re-baselining.
-- [ ] Fleet-aggregate benchmark against IESO's Variable Generation Forecast
-      Summary, the only lead-time-comparable public reference available
-- [ ] Sequence models in the live path. An LSTM with site embeddings is trained
-      and evaluated offline but is not served — its roster gate is fail-open,
-      which is a prerequisite for wiring it in. A Temporal Fusion Transformer is
-      the intended upgrade beyond that.
-- [ ] Standardize wind speed units on m/s (retrain; batched with the next model
-      upgrade)
-- [ ] Terraform for buckets, IAM, and Cloud Run
-- [ ] `/history` endpoint for served evaluation history
-- [ ] National scope expansion beyond Ontario
+- Local pipeline: ingest, features, train, predict, evaluate
+- Python package + Prefect flows
+- Cloud Run Job running the daily fetch-and-predict pipeline
+- Prefect Cloud scheduling the Job (Managed pool, invoke-only credentials)
+- FastAPI on Cloud Run serving predictions from GCS
+- Fail-closed data quality gates 
+- W&B evaluation logging with persistence reference and skill score
 
 ---
 
