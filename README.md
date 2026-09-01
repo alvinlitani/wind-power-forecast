@@ -41,7 +41,7 @@ Evaluation runs on my local machine and logs to Weights & Biases.
 | Validation | None with hyperparameters untuned (see below) |
 | Test | Full-year 2025, 394,006 site-hours (~8,756 per site).   |
 | Offline nMAE | 11.84% per-site-equal, 11.31% capacity-weighted |
-| Live nMAE | 6.2% to 19.5% capacity-weighted (median 8.0%), across 13 full-window batches, 18 Jul – 2 Aug 2026 |
+| Live nMAE | 6.2% to 19.5% capacity-weighted (median 8.71%) across 25 full-window batches |
 | Stack | XGBoost, pandas, Prefect Cloud, FastAPI, Cloud Run, GCS, W&B, OpenMeteo |
 
 The roster is every site included in the [IESO Generator Output and Capability Report](https://reports-public.ieso.ca/public/GenOutputCapabilityMonth/) which covers market-participant generators of 20 MW or more. Embedded and sub-20 MW wind generators do not appear in the report which explains the ~560 MW gap against the provincial total. The [IESO Active Contracted Generation List](https://www.ieso.ca/-/media/Files/IESO/Document-Library/power-data/supply/IESO-Active-Contracted-Generation-List.xlsx) have 59 wind generator sites that are sub-20 MW with total capacity of around ~533 MW.
